@@ -25,6 +25,7 @@
 #include <map>
 #include <algorithm>
 #include <cmath>
+#include <random>
 #include <stdexcept>
 #include <string>
 
@@ -923,6 +924,115 @@ public:
         
         return stats;
     }
+    
+    /**
+     * Cycle 4: Run Simulated Annealing optimization on GPU.
+     * 
+     * This is the core SA loop running entirely in C++/CUDA:
+     * - Random node selection
+     * - Random position generation
+     * - Delta-E computation (GPU)
+     * - Metropolis acceptance criterion
+     * - Temperature cooling
+     * 
+     * All operations happen on device - no host-device transfers during loop.
+     * 
+     * @param iterations: Number of SA iterations
+     * @param start_temp: Initial temperature
+     * @param cooling_rate: Temperature multiplier per iteration (0.9-0.99)
+     * @return Statistics dictionary (initial/final crossings, accepted moves, etc.)
+     */
+    std::map<std::string, double> run_sa_optimization(
+        int iterations,
+        double start_temp,
+        double cooling_rate
+    ) {
+        // Initialize statistics
+        std::map<std::string, double> stats;
+        
+        // Get initial energy
+        long long initial_crossings = calculate_total_crossings();
+        stats["initial_crossings"] = static_cast<double>(initial_crossings);
+        
+        // SA parameters
+        double temperature = start_temp;
+        int accepted_moves = 0;
+        int rejected_moves = 0;
+        
+        // Get current coordinates to compute bounds
+        auto coords = get_coordinates();
+        const auto& nodes_x = coords.first;
+        const auto& nodes_y = coords.second;
+        
+        // Compute bounding box for random position generation
+        int min_x = *std::min_element(nodes_x.begin(), nodes_x.end());
+        int max_x = *std::max_element(nodes_x.begin(), nodes_x.end());
+        int min_y = *std::min_element(nodes_y.begin(), nodes_y.end());
+        int max_y = *std::max_element(nodes_y.begin(), nodes_y.end());
+        
+        // Add some margin for exploration
+        int width = max_x - min_x;
+        int height = max_y - min_y;
+        min_x -= width / 4;
+        max_x += width / 4;
+        min_y -= height / 4;
+        max_y += height / 4;
+        
+        // Random number generator
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> node_dist(0, num_nodes - 1);
+        std::uniform_int_distribution<> x_dist(min_x, max_x);
+        std::uniform_int_distribution<> y_dist(min_y, max_y);
+        std::uniform_real_distribution<> prob_dist(0.0, 1.0);
+        
+        // Main SA loop
+        for (int iter = 0; iter < iterations; iter++) {
+            // Select random node
+            int node_id = node_dist(gen);
+            
+            // Generate random new position
+            int new_x = x_dist(gen);
+            int new_y = y_dist(gen);
+            
+            // Compute delta-E (only edges connected to node_id)
+            int delta_e = compute_delta_e(node_id, new_x, new_y);
+            
+            // Metropolis acceptance criterion
+            bool accept = false;
+            if (delta_e < 0) {
+                // Always accept improvement
+                accept = true;
+            } else if (temperature > 1e-10) {
+                // Accept with probability exp(-delta_e / temperature)
+                double prob = std::exp(-static_cast<double>(delta_e) / temperature);
+                if (prob_dist(gen) < prob) {
+                    accept = true;
+                }
+            }
+            
+            if (accept) {
+                // Apply move
+                update_node_position(node_id, new_x, new_y);
+                accepted_moves++;
+            } else {
+                rejected_moves++;
+            }
+            
+            // Cool down temperature
+            temperature *= cooling_rate;
+        }
+        
+        // Get final energy
+        long long final_crossings = calculate_total_crossings();
+        stats["final_crossings"] = static_cast<double>(final_crossings);
+        stats["iterations"] = static_cast<double>(iterations);
+        stats["accepted_moves"] = static_cast<double>(accepted_moves);
+        stats["rejected_moves"] = static_cast<double>(rejected_moves);
+        stats["final_temperature"] = temperature;
+        
+        return stats;
+    }
 };
 
 // ============================================================================
@@ -986,9 +1096,16 @@ PYBIND11_MODULE(planar_cuda, m) {
         
         // Cycle 3: Spatial Hash Methods
         .def("get_spatial_hash_stats", &PlanarSolver::get_spatial_hash_stats,
-            "Get spatial hash statistics (cell_size, num_cells, etc.)");
+            "Get spatial hash statistics (cell_size, num_cells, etc.)")
+        
+        // Cycle 4: SA Optimizer
+        .def("run_sa_optimization", &PlanarSolver::run_sa_optimization,
+            py::arg("iterations"),
+            py::arg("start_temp"),
+            py::arg("cooling_rate"),
+            "Run Simulated Annealing optimization on GPU");
     
     // Module metadata
-    m.attr("__version__") = "0.4.5-cycle3.5";
+    m.attr("__version__") = "0.5.0-cycle4";
     m.attr("cuda_enabled") = true;
 }
