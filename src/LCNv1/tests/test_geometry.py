@@ -8,10 +8,10 @@ import json
 import sys
 import os
 
-# Add src to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from geometry import Point, GeometryCore
+from core.geometry import Point, GeometryCore
 
 
 class TestPoint:
@@ -153,9 +153,11 @@ class TestGeometryIntegration:
     def load_15_nodes(self):
         """Load the 15-nodes.json test dataset."""
         json_path = os.path.join(
-            os.path.dirname(__file__), 
-            '..', 
-            'live-2025-example-instances', 
+            os.path.dirname(__file__),
+            '..',
+            '..',
+            '..',
+            'live-2025-example-instances',
             '15-nodes.json'
         )
         with open(json_path, 'r') as f:

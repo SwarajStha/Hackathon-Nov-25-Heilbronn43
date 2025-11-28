@@ -3,7 +3,7 @@ Sprint 3/4: Graph Data Structures
 Separates immutable topology (GraphData) from mutable positions (GridState).
 """
 from typing import List, Tuple, Set, Dict
-from geometry import Point
+from .geometry import Point
 
 
 class GraphData:

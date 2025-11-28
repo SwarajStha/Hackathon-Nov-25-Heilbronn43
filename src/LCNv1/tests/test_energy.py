@@ -10,11 +10,11 @@ import json
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from geometry import Point
-from graph import GraphData, GridState
-from cost import ICostFunction, SoftMaxCost
+from core.geometry import Point
+from core.graph import GraphData, GridState
+from core.cost import ICostFunction, SoftMaxCost
 
 
 class TestGraphDataStructures:
@@ -113,11 +113,13 @@ class TestCostFunction:
     
     @pytest.fixture
     def load_15_nodes(self):
-        """Load 15-nodes.json dataset."""
+        """Load 15-nodes.json"""
         json_path = os.path.join(
-            os.path.dirname(__file__), 
-            '..', 
-            'live-2025-example-instances', 
+            os.path.dirname(__file__),
+            '..',
+            '..',
+            '..',
+            'live-2025-example-instances',
             '15-nodes.json'
         )
         with open(json_path, 'r') as f:
@@ -200,6 +202,8 @@ class TestDeltaUpdateCorrectness:
         json_path = os.path.join(
             os.path.dirname(__file__), 
             '..', 
+            '..',
+            '..',
             'live-2025-example-instances', 
             '15-nodes.json'
         )

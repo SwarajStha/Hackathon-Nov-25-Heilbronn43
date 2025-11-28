@@ -8,9 +8,9 @@ from abc import ABC, abstractmethod
 from typing import Tuple
 import math
 
-from geometry import Point, GeometryCore
-from graph import GraphData, GridState
-from spatial_index import SpatialHash
+from .geometry import Point, GeometryCore
+from .graph import GraphData, GridState
+from .spatial_index import SpatialHash
 
 
 class ICostFunction(ABC):

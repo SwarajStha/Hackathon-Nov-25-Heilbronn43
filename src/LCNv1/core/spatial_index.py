@@ -7,7 +7,7 @@ to determine which cells each edge occupies.
 """
 from typing import Set, List, Tuple, Dict
 from collections import defaultdict
-from geometry import Point, BoundingBox
+from .geometry import Point, BoundingBox
 
 
 class SpatialHash:
