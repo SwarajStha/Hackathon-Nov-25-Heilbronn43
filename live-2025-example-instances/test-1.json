@@ -1,0 +1,83 @@
+{
+    "nodes": [
+        {
+            "id": 0,
+            "x": 171,
+            "y": 166
+        },
+        {
+            "id": 1,
+            "x": 136,
+            "y": 45
+        },
+        {
+            "id": 2,
+            "x": 20,
+            "y": 150
+        },
+        {
+            "id": 3,
+            "x": 123,
+            "y": 96
+        },
+        {
+            "id": 4,
+            "x": 5,
+            "y": 0
+        },
+        {
+            "id": 5,
+            "x": 168,
+            "y": 157
+        },
+        {
+            "id": 6,
+            "x": 173,
+            "y": 13
+        }
+    ],
+    "edges": [
+        {
+            "source": 2,
+            "target": 5
+        },
+        {
+            "source": 1,
+            "target": 6
+        },
+        {
+            "source": 0,
+            "target": 4
+        },
+        {
+            "source": 3,
+            "target": 4
+        },
+        {
+            "source": 2,
+            "target": 3
+        },
+        {
+            "source": 0,
+            "target": 1
+        },
+        {
+            "source": 1,
+            "target": 5
+        },
+        {
+            "source": 5,
+            "target": 6
+        },
+        {
+            "source": 3,
+            "target": 5
+        },
+        {
+            "source": 0,
+            "target": 6
+        }
+    ],
+    "width": 206,
+    "height": 205
+}

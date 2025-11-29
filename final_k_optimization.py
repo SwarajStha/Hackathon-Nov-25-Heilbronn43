@@ -169,7 +169,7 @@ def main():
     
     # 测试实例
     instances = [
-        ('live-2025-example-instances/15-nodes.json', 10, 20000, 3),  # 小实例：15次运行
+        ('live-2025-example-instances/625-nodes.json', 5, 30000, 3),  # 小实例：15次运行
         ('live-2025-example-instances/225-nodes.json', 20, 30000, 3),  # 中实例：15次运行
         ('live-2025-example-instances/625-nodes.json', 20, 30000, 3), # 大实例：20次运行
     ]
