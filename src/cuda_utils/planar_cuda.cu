@@ -309,6 +309,124 @@ __global__ void count_crossings_spatial_kernel(
 }
 
 // ============================================================================
+// NEW KERNEL: K-Value Calculation (Per-Edge Crossing Counts)
+// ============================================================================
+
+/**
+ * Count crossings for each edge individually (K-value computation).
+ * 
+ * Purpose:
+ *   - Calculate how many edges each edge crosses with
+ *   - Used to find K-value (maximum crossings for any single edge)
+ *   - Different from total crossing count (which sums all crossings)
+ * 
+ * Algorithm:
+ *   Each thread processes one edge:
+ *   1. Compare this edge with ALL other edges
+ *   2. Count intersections
+ *   3. Store count in edge_crossings[thread_id]
+ * 
+ * Complexity: O(E²) but parallelized across E threads
+ * 
+ * @param nodes_x: Node x-coordinates
+ * @param nodes_y: Node y-coordinates  
+ * @param edges: Edge pairs
+ * @param num_edges: Total number of edges
+ * @param edge_crossings: Output array [num_edges] - crossings per edge
+ */
+__global__ void count_edge_crossings_kernel(
+    const int* nodes_x,
+    const int* nodes_y,
+    const int2* edges,
+    int num_edges,
+    int* edge_crossings  // Output: crossing count for each edge
+) {
+    int edge_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (edge_idx >= num_edges) {
+        return;
+    }
+    
+    // Get endpoints of current edge
+    int2 edge_i = edges[edge_idx];
+    int u1 = edge_i.x;
+    int v1 = edge_i.y;
+    
+    int p1x = nodes_x[u1];
+    int p1y = nodes_y[u1];
+    int p2x = nodes_x[v1];
+    int p2y = nodes_y[v1];
+    
+    int count = 0;
+    
+    // Compare with ALL other edges (including both i<j and i>j)
+    for (int j = 0; j < num_edges; j++) {
+        if (j == edge_idx) continue;  // Skip self
+        
+        int2 edge_j = edges[j];
+        int u2 = edge_j.x;
+        int v2 = edge_j.y;
+        
+        int q1x = nodes_x[u2];
+        int q1y = nodes_y[u2];
+        int q2x = nodes_x[v2];
+        int q2y = nodes_y[v2];
+        
+        // Check intersection
+        if (segments_intersect(p1x, p1y, p2x, p2y, q1x, q1y, q2x, q2y)) {
+            count++;
+        }
+    }
+    
+    // Store crossing count for this edge
+    edge_crossings[edge_idx] = count;
+}
+
+/**
+ * Find maximum value in array (parallel reduction).
+ * 
+ * Purpose:
+ *   - Find K-value = max(edge_crossings[])
+ *   - Parallel reduction for O(log N) complexity
+ * 
+ * Algorithm:
+ *   1. Load data into shared memory
+ *   2. Binary reduction tree (each step halves active threads)
+ *   3. Final result in result[0]
+ * 
+ * @param data: Input array
+ * @param n: Array size
+ * @param result: Output (max value)
+ */
+__global__ void find_max_kernel(
+    const int* data,
+    int n,
+    int* result
+) {
+    extern __shared__ int sdata[];
+    
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Load data into shared memory
+    sdata[tid] = (idx < n) ? data[idx] : 0;
+    __syncthreads();
+    
+    // Parallel reduction (find max)
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s && idx + s < n) {
+            sdata[tid] = max(sdata[tid], sdata[tid + s]);
+        }
+        __syncthreads();
+    }
+    
+    // Write block result
+    if (tid == 0) {
+        atomicMax(result, sdata[0]);
+    }
+}
+
+// ============================================================================
 // C++ Class: PlanarSolver (OOP Interface)
 // ============================================================================
 
@@ -357,6 +475,11 @@ private:
     int* d_edge_cell_min_y;
     int* d_edge_cell_max_y;
     bool edge_cells_cached;
+    
+    // NEW: K-value calculation (per-edge crossing counts)
+    int* d_edge_crossings;  ///< Device array: crossing count for each edge
+    int* d_k_value_result;  ///< Device memory for K-value result
+    bool k_value_dirty;     ///< True if K-value needs recalculation
     
     // Graph dimensions
     int num_nodes;        ///< Number of nodes in graph
@@ -426,8 +549,9 @@ public:
         d_initial_x(nullptr), d_initial_y(nullptr),
         d_edge_cell_min_x(nullptr), d_edge_cell_max_x(nullptr),
         d_edge_cell_min_y(nullptr), d_edge_cell_max_y(nullptr),
+        d_edge_crossings(nullptr), d_k_value_result(nullptr),  // NEW
         num_nodes(nodes_x.size()), num_edges(edges.size()),
-        bbox_cached(false), edge_cells_cached(false),
+        bbox_cached(false), edge_cells_cached(false), k_value_dirty(true),  // NEW
         max_width(width), max_height(height)
     {
         // Cycle 3: Configure spatial hash
@@ -527,6 +651,11 @@ public:
             cudaMemcpyHostToDevice
         ));
         
+        // NEW: Allocate K-value calculation buffers
+        CUDA_CHECK(cudaMalloc(&d_edge_crossings, num_edges * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_k_value_result, sizeof(int)));
+        k_value_dirty = true;  // Needs initial calculation
+        
         // Cycle 3.5: Pre-compute edge cell indices if using spatial hash
         if (use_spatial_hash && bbox_cached) {
             // Allocate device memory for cell indices
@@ -595,6 +724,9 @@ public:
         if (d_edge_cell_max_x) cudaFree(d_edge_cell_max_x);
         if (d_edge_cell_min_y) cudaFree(d_edge_cell_min_y);
         if (d_edge_cell_max_y) cudaFree(d_edge_cell_max_y);
+        // NEW: Free K-value buffers
+        if (d_edge_crossings) cudaFree(d_edge_crossings);
+        if (d_k_value_result) cudaFree(d_k_value_result);
     }
     
     // Disable copy and move (prevent double-free)
@@ -991,6 +1123,9 @@ public:
             sizeof(int),
             cudaMemcpyHostToDevice
         ));
+        
+        // NEW: Mark K-value as dirty after position change
+        k_value_dirty = true;
     }
     
     /**
@@ -1027,8 +1162,114 @@ public:
         return {x, y};
     }
     
+    // ========================================================================
+    // NEW: K-Value Calculation Methods
+    // ========================================================================
+    
     /**
-     * Compute delta-E (change in crossings) for a hypothetical move.
+     * Calculate K-value: maximum crossing count among all edges.
+     * 
+     * Purpose:
+     *   - The competition metric is K-value, NOT total crossings
+     *   - K = max(crossings per edge)
+     *   - Lower K is better
+     * 
+     * Algorithm:
+     *   1. Launch GPU kernel to count crossings for each edge
+     *   2. Find maximum value using parallel reduction
+     *   3. Return K-value
+     * 
+     * Complexity: O(E²) parallelized + O(E) reduction
+     * 
+     * @return K-value (maximum crossing count on any single edge)
+     */
+    int calculate_k_value() {
+        if (num_edges == 0) return 0;
+        
+        // Step 1: Count crossings for each edge
+        dim3 block(256);
+        dim3 grid((num_edges + 255) / 256);
+        
+        count_edge_crossings_kernel<<<grid, block>>>(
+            d_nodes_x,
+            d_nodes_y,
+            d_edges,
+            num_edges,
+            d_edge_crossings
+        );
+        
+        CUDA_CHECK(cudaDeviceSynchronize());
+        
+        // Step 2: Find maximum value
+        int h_k_value = 0;
+        CUDA_CHECK(cudaMemcpy(
+            d_k_value_result,
+            &h_k_value,
+            sizeof(int),
+            cudaMemcpyHostToDevice
+        ));
+        
+        int shared_mem_size = block.x * sizeof(int);
+        find_max_kernel<<<grid, block, shared_mem_size>>>(
+            d_edge_crossings,
+            num_edges,
+            d_k_value_result
+        );
+        
+        CUDA_CHECK(cudaDeviceSynchronize());
+        
+        // Step 3: Download result
+        CUDA_CHECK(cudaMemcpy(
+            &h_k_value,
+            d_k_value_result,
+            sizeof(int),
+            cudaMemcpyDeviceToHost
+        ));
+        
+        k_value_dirty = false;
+        return h_k_value;
+    }
+    
+    /**
+     * Get crossing counts for all edges.
+     * 
+     * Purpose:
+     *   - Detailed analysis: which edges have high crossings?
+     *   - Debugging and visualization
+     * 
+     * @return Vector of crossing counts (one per edge)
+     */
+    std::vector<int> get_edge_crossings() {
+        if (num_edges == 0) return {};
+        
+        // Compute if needed
+        if (k_value_dirty) {
+            calculate_k_value();
+        }
+        
+        // Download edge crossings array
+        std::vector<int> h_edge_crossings(num_edges);
+        CUDA_CHECK(cudaMemcpy(
+            h_edge_crossings.data(),
+            d_edge_crossings,
+            num_edges * sizeof(int),
+            cudaMemcpyDeviceToHost
+        ));
+        
+        return h_edge_crossings;
+    }
+    
+    /**
+     * Mark K-value as dirty (needs recalculation).
+     * 
+     * Called internally after node movements.
+     */
+    void mark_k_value_dirty() {
+        k_value_dirty = true;
+    }
+    
+    /**
+     * Compute delta_e (change in crossings) for a hypothetical move.
      * 
      * OOA Analysis:
      * - Temporarily modifies state
@@ -1348,6 +1589,13 @@ PYBIND11_MODULE(planar_cuda, m) {
         
         .def("calculate_total_crossings", &PlanarSolver::calculate_total_crossings,
             "Calculate total number of edge crossings using GPU")
+        
+        // NEW: K-Value Calculation
+        .def("calculate_k_value", &PlanarSolver::calculate_k_value,
+            "Calculate K-value (maximum crossing count on any single edge)")
+        
+        .def("get_edge_crossings", &PlanarSolver::get_edge_crossings,
+            "Get crossing counts for all edges (returns list)")
         
         .def("get_coordinates", &PlanarSolver::get_coordinates,
             "Get current node coordinates")
