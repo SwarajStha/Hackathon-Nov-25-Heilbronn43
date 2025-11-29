@@ -103,7 +103,7 @@ def run_cuda_optimization(instance_path, iterations=5000, cell_size=100, seed=No
     return k, total, final_nodes_x, final_nodes_y, elapsed, edge_crossings
 
 
-def optimize_for_k(instance_path, num_runs=5, iterations=5000, cell_size=100):
+def optimize_for_k(instance_path, num_runs=10, iterations=20000, cell_size=100):
     """
     多次運行優化,選擇K值最小的結果
     
@@ -234,8 +234,8 @@ def main():
             print(f"\n⚠️  文件不存在: {instance_path}")
             continue
         
-        # 優化K值 (運行5次)
-        result = optimize_for_k(instance_path, num_runs=5, iterations=5000)
+        # 優化K值 (運行10次，每次20000迭代)
+        result = optimize_for_k(instance_path, num_runs=10, iterations=20000)
         
         # 保存結果
         output_file = save_result(instance_path, result, output_dir)
