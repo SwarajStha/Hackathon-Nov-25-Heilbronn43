@@ -7,6 +7,7 @@ from .geometry import Point, GeometryCore, BoundingBox
 from .graph import GraphData, GridState
 from .spatial_index import SpatialHash
 from .cost import ICostFunction, SoftMaxCost
+from .k_plane_cost import KPlaneCost
 
 __all__ = [
     'Point',
@@ -17,4 +18,5 @@ __all__ = [
     'SpatialHash',
     'ICostFunction',
     'SoftMaxCost',
+    'KPlaneCost',
 ]

@@ -152,6 +152,62 @@ class GeometryCore:
         )
     
     @staticmethod
+    def point_on_segment_interior(p: Point, a: Point, b: Point) -> bool:
+        """
+        Check if point p lies strictly in the interior of segment a-b.
+        (NOT including endpoints)
+        
+        Returns:
+            True if p is strictly between a and b on the line segment
+        """
+        # Check if p is one of the endpoints
+        if p == a or p == b:
+            return False
+        
+        # Point must be collinear with segment
+        if GeometryCore.cross_product(a, b, p) != 0:
+            return False
+        
+        # Point must be within the bounding box of the segment
+        # For strictly interior points, BOTH coordinates must be within bounds
+        # (or equal for degenerate cases like vertical/horizontal lines)
+        x_in_range = min(a.x, b.x) <= p.x <= max(a.x, b.x)
+        y_in_range = min(a.y, b.y) <= p.y <= max(a.y, b.y)
+        
+        return x_in_range and y_in_range
+    
+    @staticmethod
+    def segments_overlap(a1: Point, b1: Point, a2: Point, b2: Point) -> bool:
+        """
+        Check if two line segments overlap (share more than just an endpoint).
+        
+        Returns:
+            True if segments share a non-trivial portion (overlap or one contains the other)
+        """
+        # Check if segments are collinear
+        if GeometryCore.cross_product(a1, b1, a2) != 0:
+            return False
+        if GeometryCore.cross_product(a1, b1, b2) != 0:
+            return False
+        
+        # Segments are collinear, check for overlap
+        # Project onto dominant axis
+        if abs(b1.x - a1.x) > abs(b1.y - a1.y):
+            # Use x-axis
+            seg1_min, seg1_max = min(a1.x, b1.x), max(a1.x, b1.x)
+            seg2_min, seg2_max = min(a2.x, b2.x), max(a2.x, b2.x)
+        else:
+            # Use y-axis
+            seg1_min, seg1_max = min(a1.y, b1.y), max(a1.y, b1.y)
+            seg2_min, seg2_max = min(a2.y, b2.y), max(a2.y, b2.y)
+        
+        # Check for overlap (more than just endpoint touching)
+        # Overlap exists if intervals intersect with more than a single point
+        overlap_start = max(seg1_min, seg2_min)
+        overlap_end = min(seg1_max, seg2_max)
+        return overlap_start < overlap_end
+    
+    @staticmethod
     def point_to_segment_distance_squared(p: Point, a: Point, b: Point) -> int:
         """
         Calculate squared distance from point p to segment a-b.

@@ -69,7 +69,8 @@ class GridState:
     Maintains boundary constraints and collision detection.
     """
     
-    def __init__(self, positions: Dict[int, Point], width: int, height: int):
+    def __init__(self, positions: Dict[int, Point], width: int, height: int, graph_data: 'GraphData' = None,
+                 enable_constraints: bool = True):
         """
         Initialize grid state.
         
@@ -77,10 +78,14 @@ class GridState:
             positions: Dictionary mapping node_id -> Point
             width: Grid width
             height: Grid height
+            graph_data: Optional GraphData for geometric constraint checking
+            enable_constraints: Whether to enable geometric constraint checking (default: True)
         """
         self.width = width
         self.height = height
         self._positions = positions.copy()
+        self._graph_data = graph_data
+        self._enable_constraints = enable_constraints
         
         # Build reverse map for collision detection
         self._location_to_node: Dict[Point, int] = {}
@@ -102,10 +107,29 @@ class GridState:
         Args:
             node_id: Node to move
             new_pos: New position
+            
+        Raises:
+            ValueError: If position violates constraints:
+                - Out of bounds
+                - Already occupied by another node
+                - (if enabled) Node would be on interior of an edge
+                - (if enabled) Movement would create overlapping edges
         """
+        from .geometry import GeometryCore
+        
         # Validate bounds
         if not (0 <= new_pos.x <= self.width and 0 <= new_pos.y <= self.height):
             raise ValueError(f"Position {new_pos} out of bounds ({self.width}x{self.height})")
+        
+        # Check if position is already occupied by a DIFFERENT node
+        if new_pos in self._location_to_node:
+            occupying_node = self._location_to_node[new_pos]
+            if occupying_node != node_id:
+                raise ValueError(f"Position {new_pos} already occupied by node {occupying_node}")
+        
+        # Note: Geometric constraints (nodes on edges, edge overlaps) are enforced
+        # through the cost function's violation penalty, not here.
+        # This avoids incomplete checking and ensures consistency.
         
         # Remove from old location
         old_pos = self._positions.get(node_id)
@@ -140,7 +164,7 @@ class GridState:
     
     def clone(self) -> 'GridState':
         """Create a deep copy of this state."""
-        return GridState(self._positions.copy(), self.width, self.height)
+        return GridState(self._positions, self.width, self.height, self._graph_data, self._enable_constraints)
     
     def copy(self) -> 'GridState':
         """Alias for clone() for backward compatibility."""

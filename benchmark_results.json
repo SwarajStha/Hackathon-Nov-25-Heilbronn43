@@ -1,0 +1,62 @@
+[
+  {
+    "instance": "15-nodes.json",
+    "nodes": 15,
+    "edges": 58,
+    "standard": 62,
+    "ours": 0,
+    "diff": -62,
+    "initial": 313,
+    "time": 0.46056652069091797
+  },
+  {
+    "instance": "70-nodes.json",
+    "nodes": 70,
+    "edges": 374,
+    "standard": 897,
+    "ours": 13345,
+    "diff": 12448,
+    "initial": 14871,
+    "time": 3.632538318634033
+  },
+  {
+    "instance": "100-nodes.json",
+    "nodes": 100,
+    "edges": 411,
+    "standard": 586,
+    "ours": 2013,
+    "diff": 1427,
+    "initial": 19114,
+    "time": 3.659505605697632
+  },
+  {
+    "instance": "150-nodes.json",
+    "nodes": 150,
+    "edges": 1375,
+    "standard": 10915,
+    "ours": 206839,
+    "diff": 195924,
+    "initial": 209618,
+    "time": 45.6163375377655
+  },
+  {
+    "instance": "225-nodes.json",
+    "nodes": 225,
+    "edges": 1057,
+    "standard": 2140,
+    "ours": 18575,
+    "diff": 16435,
+    "initial": 123267,
+    "time": 34.63243889808655
+  },
+  {
+    "instance": "625-nodes.json",
+    "nodes": 400,
+    "edges": 604,
+    "standard": 31,
+    "ours": 3657,
+    "diff": 3626,
+    "initial": 41276,
+    "time": 19.703596115112305
+  }
+]
