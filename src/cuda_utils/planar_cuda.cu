@@ -196,6 +196,11 @@ __global__ void count_crossings_kernel(
         int u2 = edge_j.x;
         int v2 = edge_j.y;
         
+        // Skip edges that share an endpoint (no crossing possible)
+        if (u1 == u2 || u1 == v2 || v1 == u2 || v1 == v2) {
+            continue;
+        }
+        
         // Get coordinates of edge j's endpoints
         int q1x = nodes_x[u2];
         int q1y = nodes_y[u2];
@@ -291,6 +296,11 @@ __global__ void count_crossings_spatial_kernel(
             int u2 = edge_j.x;
             int v2 = edge_j.y;
             
+            // Skip edges that share an endpoint (no crossing possible)
+            if (u1 == u2 || u1 == v2 || v1 == u2 || v1 == v2) {
+                continue;
+            }
+            
             int q1x = nodes_x[u2];
             int q1y = nodes_y[u2];
             int q2x = nodes_x[v2];
@@ -367,6 +377,11 @@ __global__ void count_edge_crossings_kernel(
         int u2 = edge_j.x;
         int v2 = edge_j.y;
         
+        // Skip edges that share an endpoint (no crossing possible)
+        if (u1 == u2 || u1 == v2 || v1 == u2 || v1 == v2) {
+            continue;
+        }
+        
         int q1x = nodes_x[u2];
         int q1y = nodes_y[u2];
         int q2x = nodes_x[v2];
@@ -424,6 +439,126 @@ __global__ void find_max_kernel(
     if (tid == 0) {
         atomicMax(result, sdata[0]);
     }
+}
+
+/**
+ * Compute delta K-value for moving one node (incremental calculation).
+ * 
+ * Purpose:
+ *   - Calculate K-value change if we move node_id to (new_x, new_y)
+ *   - More efficient than recalculating full K-value
+ *   - Used in SA optimization with K-value cost function
+ * 
+ * Algorithm:
+ *   1. For each edge connected to node_id:
+ *      - Calculate crossings with current position
+ *      - Calculate crossings with new position
+ *      - Store delta in temp array
+ *   2. Find max crossing count before move
+ *   3. Find max crossing count after move
+ *   4. Return delta_k = k_after - k_before
+ * 
+ * @param nodes_x: Current node x-coordinates
+ * @param nodes_y: Current node y-coordinates
+ * @param edges: Edge pairs
+ * @param num_edges: Total number of edges
+ * @param node_id: Node being moved
+ * @param new_x: New x-coordinate for node_id
+ * @param new_y: New y-coordinate for node_id
+ * @param edge_crossings_before: Output - crossings per edge (current state)
+ * @param edge_crossings_after: Output - crossings per edge (after move)
+ */
+__global__ void compute_delta_k_kernel(
+    const int* nodes_x,
+    const int* nodes_y,
+    const int2* edges,
+    int num_edges,
+    int node_id,
+    int new_x,
+    int new_y,
+    int* edge_crossings_before,  // Output: current crossings per edge
+    int* edge_crossings_after    // Output: crossings after move
+) {
+    int edge_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (edge_idx >= num_edges) {
+        return;
+    }
+    
+    int2 edge_i = edges[edge_idx];
+    int u1 = edge_i.x;
+    int v1 = edge_i.y;
+    
+    // Check if this edge involves the moving node
+    bool edge_involves_node = (u1 == node_id || v1 == node_id);
+    
+    // Get current positions
+    int p1x_before = nodes_x[u1];
+    int p1y_before = nodes_y[u1];
+    int p2x_before = nodes_x[v1];
+    int p2y_before = nodes_y[v1];
+    
+    // Get positions after move
+    int p1x_after = (u1 == node_id) ? new_x : nodes_x[u1];
+    int p1y_after = (u1 == node_id) ? new_y : nodes_y[u1];
+    int p2x_after = (v1 == node_id) ? new_x : nodes_x[v1];
+    int p2y_after = (v1 == node_id) ? new_y : nodes_y[v1];
+    
+    int count_before = 0;
+    int count_after = 0;
+    
+    // Compare with all other edges
+    for (int j = 0; j < num_edges; j++) {
+        if (j == edge_idx) continue;
+        
+        int2 edge_j = edges[j];
+        int u2 = edge_j.x;
+        int v2 = edge_j.y;
+        
+        // Skip edges that share an endpoint (no crossing possible)
+        if (u1 == u2 || u1 == v2 || v1 == u2 || v1 == v2) {
+            continue;
+        }
+        
+        bool other_edge_involves_node = (u2 == node_id || v2 == node_id);
+        
+        // Get other edge positions (before)
+        int q1x_before = nodes_x[u2];
+        int q1y_before = nodes_y[u2];
+        int q2x_before = nodes_x[v2];
+        int q2y_before = nodes_y[v2];
+        
+        // Get other edge positions (after)
+        int q1x_after = (u2 == node_id) ? new_x : nodes_x[u2];
+        int q1y_after = (u2 == node_id) ? new_y : nodes_y[u2];
+        int q2x_after = (v2 == node_id) ? new_x : nodes_x[v2];
+        int q2y_after = (v2 == node_id) ? new_y : nodes_y[v2];
+        
+        // Only recompute if at least one edge involves the moving node
+        if (edge_involves_node || other_edge_involves_node) {
+            // Check intersection BEFORE move
+            if (segments_intersect(p1x_before, p1y_before, p2x_before, p2y_before,
+                                 q1x_before, q1y_before, q2x_before, q2y_before)) {
+                count_before++;
+            }
+            
+            // Check intersection AFTER move
+            if (segments_intersect(p1x_after, p1y_after, p2x_after, p2y_after,
+                                 q1x_after, q1y_after, q2x_after, q2y_after)) {
+                count_after++;
+            }
+        } else {
+            // Neither edge involves moving node - crossing status unchanged
+            if (segments_intersect(p1x_before, p1y_before, p2x_before, p2y_before,
+                                 q1x_before, q1y_before, q2x_before, q2y_before)) {
+                count_before++;
+                count_after++;  // Same as before
+            }
+        }
+    }
+    
+    edge_crossings_before[edge_idx] = count_before;
+    edge_crossings_after[edge_idx] = count_after;
 }
 
 // ============================================================================
@@ -1018,6 +1153,73 @@ public:
     }
     
     /**
+     * Check if three or more nodes are collinear (on same line).
+     * This is a CRITICAL constraint: no three nodes can be on the same line.
+     * 
+     * IMPORTANT: This function checks if moving node_id would create ANY collinear triple,
+     * including with existing nodes that are already placed.
+     * 
+     * @param node_id: The node that will be moved
+     * @param all_x, all_y: All node coordinates (with node_id at NEW position)
+     * @return Number of violations (number of collinear triples involving node_id)
+     */
+    int count_collinear_nodes_violations(int node_id,
+                                         const std::vector<int>& all_x,
+                                         const std::vector<int>& all_y) {
+        if (num_nodes < 3) return 0;
+        
+        int violations = 0;
+        int nx = all_x[node_id];
+        int ny = all_y[node_id];
+        
+        // Strategy 1: Check all pairs of other nodes to see if node_id forms a collinear triple
+        for (int i = 0; i < num_nodes; i++) {
+            if (i == node_id) continue;
+            
+            for (int j = i + 1; j < num_nodes; j++) {
+                if (j == node_id) continue;
+                
+                int ix = all_x[i], iy = all_y[i];
+                int jx = all_x[j], jy = all_y[j];
+                
+                // Check if node_id, i, j are collinear using cross product
+                // Vector (i -> node_id) × (i -> j) should be non-zero
+                long long cross = (long long)(nx - ix) * (jy - iy) - (long long)(ny - iy) * (jx - ix);
+                
+                if (cross == 0) {
+                    // Three points are collinear - VIOLATION!
+                    violations++;
+                }
+            }
+        }
+        
+        // Strategy 2: CRITICAL FIX - Also check if moving node_id to same x or y 
+        // as TWO or more existing nodes (creates vertical/horizontal collinearity)
+        // This catches cases like: nodes at (100, 10), (100, 20) exist, and we try to move to (100, 30)
+        
+        int same_x_count = 0;
+        int same_y_count = 0;
+        
+        for (int i = 0; i < num_nodes; i++) {
+            if (i == node_id) continue;
+            if (all_x[i] == nx) same_x_count++;
+            if (all_y[i] == ny) same_y_count++;
+        }
+        
+        // If 2+ nodes already have the same x coordinate, moving here creates vertical collinearity
+        if (same_x_count >= 2) {
+            violations += same_x_count * (same_x_count - 1) / 2;  // Number of pairs
+        }
+        
+        // If 2+ nodes already have the same y coordinate, moving here creates horizontal collinearity
+        if (same_y_count >= 2) {
+            violations += same_y_count * (same_y_count - 1) / 2;  // Number of pairs
+        }
+        
+        return violations;
+    }
+    
+    /**
      * Count collinear edge violations for edges connected to a specific node.
      * Used to add penalty in compute_delta_e.
      * 
@@ -1260,6 +1462,231 @@ public:
     }
     
     /**
+     * Compute delta K-value for moving one node (incremental calculation).
+     * 
+     * Purpose:
+     *   - Calculate change in K-value if we move node_id to (new_x, new_y)
+     *   - More efficient than full K-value recalculation
+     *   - Used in SA optimization with K-value cost function
+     * 
+     * Algorithm:
+     *   1. Calculate edge crossings before and after move (GPU parallel)
+     *   2. Find K-value before and after
+     *   3. Return delta_k = k_after - k_before
+     * 
+     * Complexity: O(E²) parallelized, but only for affected edges
+     * 
+     * @param node_id: Node to move
+     * @param new_x: New x-coordinate
+     * @param new_y: New y-coordinate
+     * @return Change in K-value (can be negative, zero, or positive)
+     */
+    int compute_delta_k(int node_id, int new_x, int new_y) {
+        if (num_edges == 0) return 0;
+        
+        // Allocate temporary buffers for before/after edge crossings
+        int* d_crossings_before = nullptr;
+        int* d_crossings_after = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_crossings_before, num_edges * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_crossings_after, num_edges * sizeof(int)));
+        
+        // Launch kernel to compute edge crossings before and after move
+        dim3 block(256);
+        dim3 grid((num_edges + 255) / 256);
+        
+        compute_delta_k_kernel<<<grid, block>>>(
+            d_nodes_x,
+            d_nodes_y,
+            d_edges,
+            num_edges,
+            node_id,
+            new_x,
+            new_y,
+            d_crossings_before,
+            d_crossings_after
+        );
+        
+        CUDA_CHECK(cudaDeviceSynchronize());
+        
+        // Find max value before move
+        int* d_k_before = nullptr;
+        int* d_k_after = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_k_before, sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_k_after, sizeof(int)));
+        
+        int h_zero = 0;
+        CUDA_CHECK(cudaMemcpy(d_k_before, &h_zero, sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_k_after, &h_zero, sizeof(int), cudaMemcpyHostToDevice));
+        
+        int shared_mem_size = block.x * sizeof(int);
+        find_max_kernel<<<grid, block, shared_mem_size>>>(
+            d_crossings_before,
+            num_edges,
+            d_k_before
+        );
+        
+        find_max_kernel<<<grid, block, shared_mem_size>>>(
+            d_crossings_after,
+            num_edges,
+            d_k_after
+        );
+        
+        CUDA_CHECK(cudaDeviceSynchronize());
+        
+        // Download results
+        int h_k_before, h_k_after;
+        CUDA_CHECK(cudaMemcpy(&h_k_before, d_k_before, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&h_k_after, d_k_after, sizeof(int), cudaMemcpyDeviceToHost));
+        
+        // Cleanup temporary buffers
+        CUDA_CHECK(cudaFree(d_crossings_before));
+        CUDA_CHECK(cudaFree(d_crossings_after));
+        CUDA_CHECK(cudaFree(d_k_before));
+        CUDA_CHECK(cudaFree(d_k_after));
+        
+        int delta_k = h_k_after - h_k_before;
+        return delta_k;
+    }
+    
+    /**
+     * Compute bottleneck penalty cost (sum of X(e)^p).
+     * 
+     * Purpose:
+     *   - Calculate weighted sum of edge crossings
+     *   - Higher power p gives more penalty to high-crossing edges
+     *   - p=2: quadratic penalty, p=3: cubic penalty
+     * 
+     * Algorithm:
+     *   - Get crossing count for each edge
+     *   - Compute sum of (count^p) for all edges
+     * 
+     * @param power: Exponent p (typically 2 or 3)
+     * @return Sum of X(e)^p across all edges
+     */
+    long long compute_bottleneck_cost(int power) {
+        if (num_edges == 0) return 0;
+        
+        // Get per-edge crossing counts
+        auto edge_crossings = get_edge_crossings();
+        
+        // Compute sum of X(e)^p
+        long long total_cost = 0;
+        for (int count : edge_crossings) {
+            long long powered = 1;
+            for (int i = 0; i < power; i++) {
+                powered *= count;
+            }
+            total_cost += powered;
+        }
+        
+        return total_cost;
+    }
+    
+    /**
+     * Compute delta bottleneck cost for moving one node.
+     * 
+     * Purpose:
+     *   - Calculate change in sum(X(e)^p) if we move node_id
+     *   - More efficient than full recalculation
+     * 
+     * @param node_id: Node to move
+     * @param new_x: New x-coordinate
+     * @param new_y: New y-coordinate
+     * @param power: Exponent p (2 or 3)
+     * @return Change in bottleneck cost
+     */
+    long long compute_delta_bottleneck(int node_id, int new_x, int new_y, int power) {
+        if (num_edges == 0) return 0;
+        
+        // CRITICAL: Check geometry constraints BEFORE computing cost
+        // Temporarily update coordinates for constraint checking
+        std::vector<int> all_x(num_nodes);
+        std::vector<int> all_y(num_nodes);
+        CUDA_CHECK(cudaMemcpy(all_x.data(), d_nodes_x, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(all_y.data(), d_nodes_y, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+        
+        int orig_x = all_x[node_id];
+        int orig_y = all_y[node_id];
+        all_x[node_id] = new_x;
+        all_y[node_id] = new_y;
+        
+        // CRITICAL 1: Check for three or more collinear nodes
+        int collinear_nodes = count_collinear_nodes_violations(node_id, all_x, all_y);
+        if (collinear_nodes > 0) {
+            // HUGE penalty: 1 billion per collinear triple
+            // This is the MOST CRITICAL constraint - MUST be satisfied
+            return static_cast<long long>(collinear_nodes) * 1000000000LL;
+        }
+        
+        // Check collinear edge violations
+        int collinear_violations = count_collinear_violations(node_id, all_x, all_y);
+        if (collinear_violations > 0) {
+            // HUGE penalty: 500 million per violation
+            // This ensures SA will NEVER accept moves that create共线边
+            return static_cast<long long>(collinear_violations) * 500000000LL;
+        }
+        
+        // Check edge-through-node violations
+        int edge_through_node_violations = count_edge_through_node_violations(node_id, all_x, all_y);
+        if (edge_through_node_violations > 0) {
+            // HUGE penalty: 300 million per violation
+            return static_cast<long long>(edge_through_node_violations) * 300000000LL;
+        }
+        
+        // Use compute_delta_k kernel to get before/after crossings
+        int* d_crossings_before = nullptr;
+        int* d_crossings_after = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_crossings_before, num_edges * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_crossings_after, num_edges * sizeof(int)));
+        
+        dim3 block(256);
+        dim3 grid((num_edges + 255) / 256);
+        
+        compute_delta_k_kernel<<<grid, block>>>(
+            d_nodes_x,
+            d_nodes_y,
+            d_edges,
+            num_edges,
+            node_id,
+            new_x,
+            new_y,
+            d_crossings_before,
+            d_crossings_after
+        );
+        
+        CUDA_CHECK(cudaDeviceSynchronize());
+        
+        // Download results
+        std::vector<int> h_before(num_edges);
+        std::vector<int> h_after(num_edges);
+        CUDA_CHECK(cudaMemcpy(h_before.data(), d_crossings_before, num_edges * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_after.data(), d_crossings_after, num_edges * sizeof(int), cudaMemcpyDeviceToHost));
+        
+        // Compute bottleneck cost before and after
+        long long cost_before = 0;
+        long long cost_after = 0;
+        
+        for (int i = 0; i < num_edges; i++) {
+            long long powered_before = 1;
+            long long powered_after = 1;
+            
+            for (int p = 0; p < power; p++) {
+                powered_before *= h_before[i];
+                powered_after *= h_after[i];
+            }
+            
+            cost_before += powered_before;
+            cost_after += powered_after;
+        }
+        
+        // Cleanup
+        CUDA_CHECK(cudaFree(d_crossings_before));
+        CUDA_CHECK(cudaFree(d_crossings_after));
+        
+        return cost_after - cost_before;
+    }
+    
+    /**
      * Mark K-value as dirty (needs recalculation).
      * 
      * Called internally after node movements.
@@ -1324,6 +1751,15 @@ public:
         int orig_y = all_y[node_id];
         all_x[node_id] = new_x;
         all_y[node_id] = new_y;
+        
+        // CRITICAL 1: Check for three or more collinear nodes
+        int collinear_nodes = count_collinear_nodes_violations(node_id, all_x, all_y);
+        if (collinear_nodes > 0) {
+            // HUGE penalty: 1 billion per collinear triple
+            all_x[node_id] = orig_x;
+            all_y[node_id] = orig_y;
+            return static_cast<long long>(collinear_nodes) * 1000000000LL;
+        }
         
         int collinear_violations = count_collinear_violations(node_id, all_x, all_y);
         
@@ -1457,7 +1893,7 @@ public:
      * This is the core SA loop running entirely in C++/CUDA:
      * - Random node selection
      * - Random position generation
-     * - Delta-E computation (GPU)
+     * - Delta cost computation (GPU) - can be total crossings OR K-value
      * - Metropolis acceptance criterion
      * - Temperature cooling
      * 
@@ -1466,19 +1902,28 @@ public:
      * @param iterations: Number of SA iterations
      * @param start_temp: Initial temperature
      * @param cooling_rate: Temperature multiplier per iteration (0.9-0.99)
+     * @param cost_function: "total_crossings", "bottleneck_p2", "bottleneck_p3", or "k_value"
      * @return Statistics dictionary (initial/final crossings, accepted moves, etc.)
      */
     std::map<std::string, double> run_sa_optimization(
         int iterations,
         double start_temp,
-        double cooling_rate
+        double cooling_rate,
+        const std::string& cost_function = "total_crossings"
     ) {
         // Initialize statistics
         std::map<std::string, double> stats;
         
+        // Determine which cost function to use
+        bool use_k_value = (cost_function == "k_value");
+        bool use_bottleneck_p2 = (cost_function == "bottleneck_p2");
+        bool use_bottleneck_p3 = (cost_function == "bottleneck_p3");
+        
         // Get initial energy
         long long initial_crossings = calculate_total_crossings();
+        int initial_k = calculate_k_value();
         stats["initial_crossings"] = static_cast<double>(initial_crossings);
+        stats["initial_k"] = static_cast<double>(initial_k);
         
         // SA parameters
         double temperature = start_temp;
@@ -1510,17 +1955,30 @@ public:
             int new_x = x_dist(gen);
             int new_y = y_dist(gen);
             
-            // Compute delta-E (only edges connected to node_id)
-            int delta_e = compute_delta_e(node_id, new_x, new_y);
+            // Compute delta cost based on chosen cost function
+            long long delta_cost;
+            if (use_k_value) {
+                // Direct K-value optimization
+                delta_cost = compute_delta_k(node_id, new_x, new_y);
+            } else if (use_bottleneck_p2) {
+                // Quadratic bottleneck penalty: sum(X(e)^2)
+                delta_cost = compute_delta_bottleneck(node_id, new_x, new_y, 2);
+            } else if (use_bottleneck_p3) {
+                // Cubic bottleneck penalty: sum(X(e)^3)
+                delta_cost = compute_delta_bottleneck(node_id, new_x, new_y, 3);
+            } else {
+                // Default: total crossings (p=1)
+                delta_cost = compute_delta_e(node_id, new_x, new_y);
+            }
             
             // Metropolis acceptance criterion
             bool accept = false;
-            if (delta_e < 0) {
+            if (delta_cost < 0) {
                 // Always accept improvement
                 accept = true;
             } else if (temperature > 1e-10) {
-                // Accept with probability exp(-delta_e / temperature)
-                double prob = std::exp(-static_cast<double>(delta_e) / temperature);
+                // Accept with probability exp(-delta_cost / temperature)
+                double prob = std::exp(-static_cast<double>(delta_cost) / temperature);
                 if (prob_dist(gen) < prob) {
                     accept = true;
                 }
@@ -1540,7 +1998,9 @@ public:
         
         // Get final energy
         long long final_crossings = calculate_total_crossings();
+        int final_k = calculate_k_value();
         stats["final_crossings"] = static_cast<double>(final_crossings);
+        stats["final_k"] = static_cast<double>(final_k);
         stats["iterations"] = static_cast<double>(iterations);
         stats["accepted_moves"] = static_cast<double>(accepted_moves);
         stats["rejected_moves"] = static_cast<double>(rejected_moves);
@@ -1617,6 +2077,12 @@ PYBIND11_MODULE(planar_cuda, m) {
             py::arg("new_y"),
             "Compute change in crossings for a hypothetical move (without applying it)")
         
+        .def("compute_delta_k", &PlanarSolver::compute_delta_k,
+            py::arg("node_id"),
+            py::arg("new_x"),
+            py::arg("new_y"),
+            "Compute change in K-value for a hypothetical move (without applying it)")
+        
         .def("reset_to_initial", &PlanarSolver::reset_to_initial,
             "Reset graph to initial configuration")
         
@@ -1629,7 +2095,8 @@ PYBIND11_MODULE(planar_cuda, m) {
             py::arg("iterations"),
             py::arg("start_temp"),
             py::arg("cooling_rate"),
-            "Run Simulated Annealing optimization on GPU");
+            py::arg("cost_function") = "total_crossings",
+            "Run Simulated Annealing optimization on GPU. cost_function: 'total_crossings', 'bottleneck_p2', 'bottleneck_p3', or 'k_value'");
     
     // Module metadata
     m.attr("__version__") = "0.5.0-cycle4";
