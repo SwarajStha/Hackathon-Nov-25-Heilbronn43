@@ -12,8 +12,9 @@ from datetime import datetime
 
 # 添加CUDA DLL路徑
 os.add_dll_directory(r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin')
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'build_artifacts'))
-sys.path.insert(0, 'src')
+# Fix path since this script is now in dev_tests/
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'build_artifacts'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import planar_cuda
 from LCNv1.core.geometry import Point, GeometryCore
@@ -218,11 +219,11 @@ def main():
     print("智能CUDA Benchmark - K值優化")
     print("="*80)
     
-    # 測試實例
+    # 測試實例 (只測試大規模案例: 70, 100, 150 nodes)
     instances = [
-        'live-2025-example-instances/15-nodes.json',
         'live-2025-example-instances/70-nodes.json',
         'live-2025-example-instances/100-nodes.json',
+        'live-2025-example-instances/150-nodes.json',
     ]
     
     output_dir = r'D:\D_backup\2025\tum\25W\hackthon\Hackathon-Nov-25-Heilbronn43\results'

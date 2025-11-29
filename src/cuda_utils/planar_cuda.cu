@@ -1096,18 +1096,22 @@ public:
         }
         
         // Step 3.5: Check for edges passing through nodes (CRITICAL CONSTRAINT)
+        // NOTE: Coordinates are still at NEW position (from Step 3 above)
         int edge_through_node_violations = count_edge_through_node_violations(node_id, all_x, all_y);
-        
-        // Restore for subsequent steps
-        all_x[node_id] = orig_x;
-        all_y[node_id] = orig_y;
         
         if (edge_through_node_violations > 0) {
             // VIOLATION: Edge passes through non-endpoint node!
+            // Restore coordinates before returning
+            all_x[node_id] = orig_x;
+            all_y[node_id] = orig_y;
             // Each violation gets 300 million penalty
             // This ensures SA will reject moves where edges pass through nodes
             return static_cast<long long>(edge_through_node_violations) * 300000000LL;
         }
+        
+        // Restore for subsequent steps (crossing calculation)
+        all_x[node_id] = orig_x;
+        all_y[node_id] = orig_y;
         
         // Step 4: Temporarily apply the move
         CUDA_CHECK(cudaMemcpy(d_nodes_x + node_id, &new_x, sizeof(int), cudaMemcpyHostToDevice));
