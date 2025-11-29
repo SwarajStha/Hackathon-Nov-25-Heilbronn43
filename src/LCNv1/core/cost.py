@@ -134,6 +134,11 @@ class SoftMaxCost(ICostFunction):
             for j in candidates:
                 if j > i:  # Only count each pair once
                     src_j, tgt_j = graph.get_edge_endpoints(j)
+                    
+                    # Skip edges that share endpoints (proper intersections only)
+                    if src_i in (src_j, tgt_j) or tgt_i in (src_j, tgt_j):
+                        continue
+                    
                     q1 = state.get_position(src_j)
                     q2 = state.get_position(tgt_j)
                     
@@ -415,6 +420,11 @@ class SoftMaxCost(ICostFunction):
             for j in candidates:
                 if j > i:
                     src_j, tgt_j = graph.get_edge_endpoints(j)
+                    
+                    # Skip edges that share endpoints
+                    if src_i in (src_j, tgt_j) or tgt_i in (src_j, tgt_j):
+                        continue
+                    
                     q1 = state.get_position(src_j)
                     q2 = state.get_position(tgt_j)
                     

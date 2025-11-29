@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 from datetime import datetime
 
-sys.path.insert(0, str(Path(__file__).parent / 'src'))
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from LCNv1.core.geometry import Point, GeometryCore
 from LCNv1.core.k_plane_cost import KPlaneCost
@@ -133,14 +133,14 @@ def save_solution_json(solver_or_strategy, instance_name_or_dir, output_dir_or_b
 
 def test_instance(instance_name, solution_name, iterations=5000, use_init_strategy=True):
     """测试单个实例"""
-    base_dir = Path(__file__).parent / 'live-2025-example-instances'
+    base_dir = Path(__file__).parent.parent / 'live-2025-example-instances'
     instance_file = base_dir / instance_name
     solution_file = base_dir / solution_name
     
     # 创建输出目录：results/dd-HH-MM/
     now = datetime.now()
     timestamp = now.strftime("%d-%H-%M")
-    output_dir = Path(__file__).parent / 'results' / timestamp
+    output_dir = Path(__file__).parent.parent / 'results' / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # 加载数据
@@ -320,10 +320,10 @@ def main():
     worse = 0
     
     for r in results:
-        if r['diff'] < 0:
+        if r['diff_crossings'] < 0:
             status = '✅'
             better += 1
-        elif r['diff'] == 0:
+        elif r['diff_crossings'] == 0:
             status = '✨'
             equal += 1
         else:
@@ -331,7 +331,7 @@ def main():
             worse += 1
         
         print(f"{r['instance']:<20} {r['nodes']:<8} {r['edges']:<8} "
-              f"{r['standard']:<8} {r['ours']:<8} {r['diff']:+<8} {status:<8}")
+              f"{r['standard_crossings']:<8} {r['our_crossings']:<8} {r['diff_crossings']:+<8} {status:<8}")
     
     print(f"{'-'*70}")
     print(f"\n统计:")
@@ -341,7 +341,7 @@ def main():
     print(f"  成功率: {(better + equal) / len(results) * 100:.1f}%")
     
     # 保存详细结果
-    output_file = Path(__file__).parent / 'benchmark_results_enhanced.json'
+    output_file = Path(__file__).parent.parent / 'benchmark_results_enhanced.json'
     with open(output_file, 'w') as f:
         json.dump(results, f, indent=2)
     print(f"\n详细结果已保存: {output_file}")
@@ -355,15 +355,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-    
-    # 显示所有保存的结果文件
-    if results and 'output_file' in results[0]:
-        print(f"\n💾 结果文件位置:")
-        for r in results:
-            print(f"  {r['instance']:<20} -> {r['output_file']}")
-        json.dump(results, f, indent=2)
-    print(f"\n详细结果已保存: {output_file}")
 
-
-if __name__ == '__main__':
-    main()

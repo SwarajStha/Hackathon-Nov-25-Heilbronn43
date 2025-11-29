@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 from LCNv1.api import LCNSolver
-from LCNv1.core.geometry import Point, segments_intersect
+from LCNv1.core.geometry import Point, GeometryCore
 
 
 def count_crossings(nodes, edges):
@@ -36,7 +36,7 @@ def count_crossings(nodes, edges):
             p3 = Point(nodes[e2['source']]['x'], nodes[e2['source']]['y'])
             p4 = Point(nodes[e2['target']]['x'], nodes[e2['target']]['y'])
             
-            if segments_intersect(p1, p2, p3, p4):
+            if GeometryCore.segments_intersect(p1, p2, p3, p4):
                 crossings += 1
     
     return crossings

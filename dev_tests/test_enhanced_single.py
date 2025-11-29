@@ -7,7 +7,8 @@ from pathlib import Path
 import sys
 from datetime import datetime
 
-sys.path.insert(0, str(Path(__file__).parent / 'src'))
+# 修正路徑
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from LCNv1.core.geometry import Point, GeometryCore
 from LCNv1.core.graph import GraphData
