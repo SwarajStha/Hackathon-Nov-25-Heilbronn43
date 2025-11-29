@@ -125,13 +125,20 @@ __device__ bool segments_intersect(
     long long d4 = cross_product(q1x, q1y, q2x, q2y, p2x, p2y);
     
     // Segments intersect if:
-    // - q1 and q2 are on opposite sides of p1-p2: d1 * d2 < 0
-    // - p1 and p2 are on opposite sides of q1-q2: d3 * d4 < 0
+    // - q1 and q2 are on opposite sides of p1-p2: d1 and d2 have opposite signs
+    // - p1 and p2 are on opposite sides of q1-q2: d3 and d4 have opposite signs
     //
-    // We use STRICTLY less than to exclude:
-    // - Collinear cases (where one product is 0)
-    // - Endpoint touching (where one product is 0)
-    if (d1 * d2 < 0 && d3 * d4 < 0) {
+    // CRITICAL: With 6-digit coordinates (~1M), d1*d2 can exceed long long range!
+    // Example: d1 ≈ 4.5×10^10, d2 ≈ 4×10^10 → d1*d2 ≈ 1.8×10^21 > 2^63-1
+    // Solution: Check signs separately instead of multiplying
+    //
+    // "Opposite signs" means: (d1 < 0 && d2 > 0) || (d1 > 0 && d2 < 0)
+    // Equivalent to: (d1 ^ d2) < 0 (XOR of sign bits)
+    // But we also need STRICT inequality (exclude 0 for collinear/touching)
+    bool opposite_12 = (d1 < 0 && d2 > 0) || (d1 > 0 && d2 < 0);
+    bool opposite_34 = (d3 < 0 && d4 > 0) || (d3 > 0 && d4 < 0);
+    
+    if (opposite_12 && opposite_34) {
         return true;
     }
     
@@ -1607,31 +1614,34 @@ public:
         
         int orig_x = all_x[node_id];
         int orig_y = all_y[node_id];
+        
+        // STRATEGY: Penalty-based constraint enforcement
+        // - Add penalty for violations (not absolute rejection)
+        // - Allows SA to explore through violations at high temperature
+        // - Penalty: 10 billion per violation (discourages but doesn't block)
+        
+        // Count violations in ORIGINAL position
+        int violations_before = count_collinear_nodes_violations(node_id, all_x, all_y);
+        violations_before += count_collinear_violations(node_id, all_x, all_y);
+        violations_before += count_edge_through_node_violations(node_id, all_x, all_y);
+        
+        // Update to NEW position for checking
         all_x[node_id] = new_x;
         all_y[node_id] = new_y;
         
-        // CRITICAL 1: Check for three or more collinear nodes
-        int collinear_nodes = count_collinear_nodes_violations(node_id, all_x, all_y);
-        if (collinear_nodes > 0) {
-            // HUGE penalty: 1 billion per collinear triple
-            // This is the MOST CRITICAL constraint - MUST be satisfied
-            return static_cast<long long>(collinear_nodes) * 1000000000LL;
-        }
+        // Count violations in NEW position
+        int violations_after = count_collinear_nodes_violations(node_id, all_x, all_y);
+        violations_after += count_collinear_violations(node_id, all_x, all_y);
+        violations_after += count_edge_through_node_violations(node_id, all_x, all_y);
         
-        // Check collinear edge violations
-        int collinear_violations = count_collinear_violations(node_id, all_x, all_y);
-        if (collinear_violations > 0) {
-            // HUGE penalty: 500 million per violation
-            // This ensures SA will NEVER accept moves that create共线边
-            return static_cast<long long>(collinear_violations) * 500000000LL;
-        }
+        // Calculate violation penalty change
+        // Penalty: 10 billion per violation (allows exploration but discourages violations)
+        long long penalty_change = static_cast<long long>(violations_after - violations_before) * 10000000000LL;
         
-        // Check edge-through-node violations
-        int edge_through_node_violations = count_edge_through_node_violations(node_id, all_x, all_y);
-        if (edge_through_node_violations > 0) {
-            // HUGE penalty: 300 million per violation
-            return static_cast<long long>(edge_through_node_violations) * 300000000LL;
-        }
+        // Note: penalty_change will be ADDED to crossing cost later
+        // - If violations increase: positive penalty (discourage)
+        // - If violations decrease: negative penalty (reward)
+        // - SA can still accept violations at high temperature
         
         // Use compute_delta_k kernel to get before/after crossings
         int* d_crossings_before = nullptr;
@@ -1683,7 +1693,7 @@ public:
         CUDA_CHECK(cudaFree(d_crossings_before));
         CUDA_CHECK(cudaFree(d_crossings_after));
         
-        return cost_after - cost_before;
+        return cost_after - cost_before + penalty_change;
     }
     
     /**
@@ -1749,42 +1759,21 @@ public:
         // Temporarily update coordinates in memory for checking
         int orig_x = all_x[node_id];
         int orig_y = all_y[node_id];
+        
+        // STRATEGY: Penalty-based constraint enforcement (same as bottleneck)
+        int violations_before = count_collinear_nodes_violations(node_id, all_x, all_y);
+        violations_before += count_collinear_violations(node_id, all_x, all_y);
+        violations_before += count_edge_through_node_violations(node_id, all_x, all_y);
+        
         all_x[node_id] = new_x;
         all_y[node_id] = new_y;
         
-        // CRITICAL 1: Check for three or more collinear nodes
-        int collinear_nodes = count_collinear_nodes_violations(node_id, all_x, all_y);
-        if (collinear_nodes > 0) {
-            // HUGE penalty: 1 billion per collinear triple
-            all_x[node_id] = orig_x;
-            all_y[node_id] = orig_y;
-            return static_cast<long long>(collinear_nodes) * 1000000000LL;
-        }
+        int violations_after = count_collinear_nodes_violations(node_id, all_x, all_y);
+        violations_after += count_collinear_violations(node_id, all_x, all_y);
+        violations_after += count_edge_through_node_violations(node_id, all_x, all_y);
         
-        int collinear_violations = count_collinear_violations(node_id, all_x, all_y);
-        
-        if (collinear_violations > 0) {
-            // VIOLATION: Collinear edges detected!
-            // Each violation gets 500 million penalty
-            // This ensures SA will reject moves that create shared line segments
-            all_x[node_id] = orig_x;
-            all_y[node_id] = orig_y;
-            return static_cast<long long>(collinear_violations) * 500000000LL;
-        }
-        
-        // Step 3.5: Check for edges passing through nodes (CRITICAL CONSTRAINT)
-        // NOTE: Coordinates are still at NEW position (from Step 3 above)
-        int edge_through_node_violations = count_edge_through_node_violations(node_id, all_x, all_y);
-        
-        if (edge_through_node_violations > 0) {
-            // VIOLATION: Edge passes through non-endpoint node!
-            // Restore coordinates before returning
-            all_x[node_id] = orig_x;
-            all_y[node_id] = orig_y;
-            // Each violation gets 300 million penalty
-            // This ensures SA will reject moves where edges pass through nodes
-            return static_cast<long long>(edge_through_node_violations) * 300000000LL;
-        }
+        // Calculate violation penalty change (10B per violation)
+        long long penalty_change = static_cast<long long>(violations_after - violations_before) * 10000000000LL;
         
         // Restore for subsequent steps (crossing calculation)
         all_x[node_id] = orig_x;
@@ -1801,8 +1790,8 @@ public:
         CUDA_CHECK(cudaMemcpy(d_nodes_x + node_id, &old_x, sizeof(int), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_nodes_y + node_id, &old_y, sizeof(int), cudaMemcpyHostToDevice));
         
-        // Step 7: Return delta
-        return new_crossings - current_crossings;
+        // Step 7: Return delta + penalty
+        return new_crossings - current_crossings + penalty_change;
     }
     
     /**
