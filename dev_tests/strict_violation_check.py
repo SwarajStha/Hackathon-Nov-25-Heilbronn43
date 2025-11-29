@@ -149,9 +149,9 @@ if __name__ == '__main__':
     import os
     
     files = [
-        'results/11-29-04/15-nodes-cu-k4.json',
-        'results/11-29-04/70-nodes-cu-k30.json',
-        'results/11-29-04/100-nodes-cu-k33.json',
+        'results/11-29-04/15-nodes-cu-k5.json',
+        'results/11-29-04/70-nodes-cu-k25.json',
+        'results/11-29-04/100-nodes-cu-k32.json',
     ]
     
     all_valid = True

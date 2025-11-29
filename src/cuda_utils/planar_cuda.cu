@@ -811,9 +811,13 @@ public:
      * Count violations where edges pass through non-endpoint nodes.
      * Used to add penalty in compute_delta_e.
      * 
+     * This checks TWO scenarios:
+     * 1. Edges connected to node_id passing through other nodes
+     * 2. Other edges passing through node_id's NEW position
+     * 
      * @param node_id: The node that will be moved
      * @param all_x, all_y: All node coordinates (with node_id at NEW position)
-     * @return Number of violations involving edges connected to node_id
+     * @return Number of violations
      */
     int count_edge_through_node_violations(int node_id,
                                           const std::vector<int>& all_x,
@@ -831,12 +835,12 @@ public:
         
         int violations = 0;
         
-        // Check all edges connected to node_id
+        // Scenario 1: Check edges connected to node_id passing through other nodes
         for (int i = 0; i < num_edges; i++) {
             int src = edges_data[i].x;
             int tgt = edges_data[i].y;
             
-            // Skip edges not connected to node_id
+            // Only check edges connected to node_id
             if (src != node_id && tgt != node_id) {
                 continue;
             }
@@ -853,6 +857,28 @@ public:
                 if (point_on_segment_interior(px, py, x1, y1, x2, y2)) {
                     violations++;
                 }
+            }
+        }
+        
+        // Scenario 2: Check if OTHER edges pass through node_id's NEW position
+        int new_x = all_x[node_id];
+        int new_y = all_y[node_id];
+        
+        for (int i = 0; i < num_edges; i++) {
+            int src = edges_data[i].x;
+            int tgt = edges_data[i].y;
+            
+            // Skip edges connected to node_id (already handled in Scenario 1)
+            if (src == node_id || tgt == node_id) {
+                continue;
+            }
+            
+            int x1 = all_x[src], y1 = all_y[src];
+            int x2 = all_x[tgt], y2 = all_y[tgt];
+            
+            // Check if node_id's NEW position is on this edge
+            if (point_on_segment_interior(new_x, new_y, x1, y1, x2, y2)) {
+                violations++;
             }
         }
         
