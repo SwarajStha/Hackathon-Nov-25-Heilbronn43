@@ -362,6 +362,10 @@ private:
     int num_nodes;        ///< Number of nodes in graph
     int num_edges;        ///< Number of edges in graph
     
+    // Coordinate constraints
+    int max_width;        ///< Maximum x-coordinate (default: 1000000)
+    int max_height;       ///< Maximum y-coordinate (default: 1000000)
+    
     /**
      * Compute automatic cell size based on graph bounds.
      * 
@@ -415,13 +419,16 @@ public:
         const std::vector<int>& nodes_x,
         const std::vector<int>& nodes_y,
         const std::vector<std::pair<int, int>>& edges,
-        int cell_size = -1  // Default: auto-compute or disable
+        int cell_size = -1,  // Default: auto-compute or disable
+        int width = 1000000,  // Maximum x-coordinate
+        int height = 1000000  // Maximum y-coordinate
     ) : d_nodes_x(nullptr), d_nodes_y(nullptr), d_edges(nullptr),
         d_initial_x(nullptr), d_initial_y(nullptr),
         d_edge_cell_min_x(nullptr), d_edge_cell_max_x(nullptr),
         d_edge_cell_min_y(nullptr), d_edge_cell_max_y(nullptr),
         num_nodes(nodes_x.size()), num_edges(edges.size()),
-        bbox_cached(false), edge_cells_cached(false)
+        bbox_cached(false), edge_cells_cached(false),
+        max_width(width), max_height(height)
     {
         // Cycle 3: Configure spatial hash
         if (cell_size == 0) {
@@ -724,6 +731,205 @@ public:
     // ========================================================================
     
     /**
+     * Check if two line segments are collinear and overlap (share a line segment).
+     * This is a VIOLATION - edges cannot share line segments.
+     * 
+     * @param p1x, p1y: Start of segment 1
+     * @param p2x, p2y: End of segment 1
+     * @param p3x, p3y: Start of segment 2
+     * @param p4x, p4y: End of segment 2
+     * @return true if segments are collinear and overlap
+     */
+    bool segments_share_line(int p1x, int p1y, int p2x, int p2y,
+                             int p3x, int p3y, int p4x, int p4y) {
+        // Check if all points are collinear using cross product
+        long long cross1 = (long long)(p2x - p1x) * (p3y - p1y) - (long long)(p2y - p1y) * (p3x - p1x);
+        long long cross2 = (long long)(p2x - p1x) * (p4y - p1y) - (long long)(p2y - p1y) * (p4x - p1x);
+        
+        if (cross1 != 0 || cross2 != 0) {
+            return false; // Not collinear
+        }
+        
+        // All points are collinear, check for overlap
+        // Project onto the dominant axis
+        int dx = std::abs(p2x - p1x);
+        int dy = std::abs(p2y - p1y);
+        
+        int seg1_min, seg1_max, seg2_min, seg2_max;
+        
+        if (dx >= dy) {
+            // Use X axis
+            seg1_min = std::min(p1x, p2x);
+            seg1_max = std::max(p1x, p2x);
+            seg2_min = std::min(p3x, p4x);
+            seg2_max = std::max(p3x, p4x);
+        } else {
+            // Use Y axis
+            seg1_min = std::min(p1y, p2y);
+            seg1_max = std::max(p1y, p2y);
+            seg2_min = std::min(p3y, p4y);
+            seg2_max = std::max(p3y, p4y);
+        }
+        
+        // Check if ranges overlap (not just touch at endpoints)
+        int overlap_start = std::max(seg1_min, seg2_min);
+        int overlap_end = std::min(seg1_max, seg2_max);
+        
+        // True overlap if overlap_start < overlap_end
+        return overlap_start < overlap_end;
+    }
+    
+    /**
+     * Check if a point lies on a line segment (excluding endpoints).
+     * This is a VIOLATION - edges cannot pass through non-endpoint nodes.
+     * 
+     * @param px, py: Point to check
+     * @param x1, y1: Segment start
+     * @param x2, y2: Segment end
+     * @return true if point is on segment (not at endpoints)
+     */
+    bool point_on_segment_interior(int px, int py, int x1, int y1, int x2, int y2) {
+        // Check if it's an endpoint
+        if ((px == x1 && py == y1) || (px == x2 && py == y2)) {
+            return false;
+        }
+        
+        // Check if collinear using cross product
+        long long cross = (long long)(x2 - x1) * (py - y1) - (long long)(y2 - y1) * (px - x1);
+        if (cross != 0) {
+            return false;
+        }
+        
+        // Check if within bounding box
+        if (px < std::min(x1, x2) || px > std::max(x1, x2)) return false;
+        if (py < std::min(y1, y2) || py > std::max(y1, y2)) return false;
+        
+        return true;
+    }
+    
+    /**
+     * Count violations where edges pass through non-endpoint nodes.
+     * Used to add penalty in compute_delta_e.
+     * 
+     * @param node_id: The node that will be moved
+     * @param all_x, all_y: All node coordinates (with node_id at NEW position)
+     * @return Number of violations involving edges connected to node_id
+     */
+    int count_edge_through_node_violations(int node_id,
+                                          const std::vector<int>& all_x,
+                                          const std::vector<int>& all_y) {
+        if (num_edges == 0) return 0;
+        
+        // Copy edges from device to host
+        std::vector<int2> edges_data(num_edges);
+        CUDA_CHECK(cudaMemcpy(
+            edges_data.data(),
+            d_edges,
+            num_edges * sizeof(int2),
+            cudaMemcpyDeviceToHost
+        ));
+        
+        int violations = 0;
+        
+        // Check all edges connected to node_id
+        for (int i = 0; i < num_edges; i++) {
+            int src = edges_data[i].x;
+            int tgt = edges_data[i].y;
+            
+            // Skip edges not connected to node_id
+            if (src != node_id && tgt != node_id) {
+                continue;
+            }
+            
+            int x1 = all_x[src], y1 = all_y[src];
+            int x2 = all_x[tgt], y2 = all_y[tgt];
+            
+            // Check if this edge passes through any other node
+            for (int nid = 0; nid < num_nodes; nid++) {
+                if (nid == src || nid == tgt) continue;
+                
+                int px = all_x[nid], py = all_y[nid];
+                
+                if (point_on_segment_interior(px, py, x1, y1, x2, y2)) {
+                    violations++;
+                }
+            }
+        }
+        
+        return violations;
+    }
+    
+    /**
+     * Count collinear edge violations for edges connected to a specific node.
+     * Used to add penalty in compute_delta_e.
+     * 
+     * @param node_id: The node that will be moved
+     * @param all_x, all_y: All node coordinates (with node_id at NEW position)
+     * @return Number of collinear violations involving edges connected to node_id
+     */
+    int count_collinear_violations(int node_id, 
+                                   const std::vector<int>& all_x,
+                                   const std::vector<int>& all_y) {
+        if (num_edges == 0) return 0;
+        
+        // Copy edges from device to host
+        std::vector<int2> edges_data(num_edges);
+        CUDA_CHECK(cudaMemcpy(
+            edges_data.data(),
+            d_edges,
+            num_edges * sizeof(int2),
+            cudaMemcpyDeviceToHost
+        ));
+        
+        int violations = 0;
+        
+        // Get edges connected to node_id
+        std::vector<std::pair<int, int>> my_edges;
+        for (int i = 0; i < num_edges; i++) {
+            int src = edges_data[i].x;
+            int tgt = edges_data[i].y;
+            if (src == node_id || tgt == node_id) {
+                my_edges.push_back({src, tgt});
+            }
+        }
+        
+        // Check each of my edges against all other edges
+        for (const auto& my_edge : my_edges) {
+            int s1 = my_edge.first;
+            int t1 = my_edge.second;
+            int p1x = all_x[s1], p1y = all_y[s1];
+            int p2x = all_x[t1], p2y = all_y[t1];
+            
+            for (int i = 0; i < num_edges; i++) {
+                int s2 = edges_data[i].x;
+                int t2 = edges_data[i].y;
+                
+                // Skip if it's the same edge
+                if ((s1 == s2 && t1 == t2) || (s1 == t2 && t1 == s2)) {
+                    continue;
+                }
+                
+                // Skip if edges share endpoints (this is allowed)
+                int shared = 0;
+                if (s1 == s2 || s1 == t2) shared++;
+                if (t1 == s2 || t1 == t2) shared++;
+                if (shared > 0) {
+                    continue;
+                }
+                
+                int p3x = all_x[s2], p3y = all_y[s2];
+                int p4x = all_x[t2], p4y = all_y[t2];
+                
+                if (segments_share_line(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y)) {
+                    violations++;
+                }
+            }
+        }
+        
+        return violations;
+    }
+    
+    /**
      * Update a single node's position in GPU memory.
      * 
      * OOA State Modification:
@@ -820,6 +1026,23 @@ public:
             );
         }
         
+        // Step 0: Check for duplicate coordinates (CRITICAL CONSTRAINT)
+        // If new position overlaps with ANY other node, apply massive penalty
+        // This prevents violations where multiple nodes share the same coordinate
+        std::vector<int> all_x(num_nodes);
+        std::vector<int> all_y(num_nodes);
+        CUDA_CHECK(cudaMemcpy(all_x.data(), d_nodes_x, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(all_y.data(), d_nodes_y, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+        
+        for (int i = 0; i < num_nodes; i++) {
+            if (i != node_id && all_x[i] == new_x && all_y[i] == new_y) {
+                // VIOLATION: Duplicate coordinate detected!
+                // Return huge penalty to prevent SA from accepting this move
+                // Penalty = 1 billion crossings (effectively infinite)
+                return 1000000000LL;
+            }
+        }
+        
         // Step 1: Get current crossing count
         long long current_crossings = calculate_total_crossings();
         
@@ -828,18 +1051,50 @@ public:
         CUDA_CHECK(cudaMemcpy(&old_x, d_nodes_x + node_id, sizeof(int), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(&old_y, d_nodes_y + node_id, sizeof(int), cudaMemcpyDeviceToHost));
         
-        // Step 3: Temporarily apply the move
+        // Step 3: Check for collinear edge violations (CRITICAL CONSTRAINT)
+        // Temporarily update coordinates in memory for checking
+        int orig_x = all_x[node_id];
+        int orig_y = all_y[node_id];
+        all_x[node_id] = new_x;
+        all_y[node_id] = new_y;
+        
+        int collinear_violations = count_collinear_violations(node_id, all_x, all_y);
+        
+        if (collinear_violations > 0) {
+            // VIOLATION: Collinear edges detected!
+            // Each violation gets 500 million penalty
+            // This ensures SA will reject moves that create shared line segments
+            all_x[node_id] = orig_x;
+            all_y[node_id] = orig_y;
+            return static_cast<long long>(collinear_violations) * 500000000LL;
+        }
+        
+        // Step 3.5: Check for edges passing through nodes (CRITICAL CONSTRAINT)
+        int edge_through_node_violations = count_edge_through_node_violations(node_id, all_x, all_y);
+        
+        // Restore for subsequent steps
+        all_x[node_id] = orig_x;
+        all_y[node_id] = orig_y;
+        
+        if (edge_through_node_violations > 0) {
+            // VIOLATION: Edge passes through non-endpoint node!
+            // Each violation gets 300 million penalty
+            // This ensures SA will reject moves where edges pass through nodes
+            return static_cast<long long>(edge_through_node_violations) * 300000000LL;
+        }
+        
+        // Step 4: Temporarily apply the move
         CUDA_CHECK(cudaMemcpy(d_nodes_x + node_id, &new_x, sizeof(int), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_nodes_y + node_id, &new_y, sizeof(int), cudaMemcpyHostToDevice));
         
-        // Step 4: Calculate new crossing count
+        // Step 5: Calculate new crossing count
         long long new_crossings = calculate_total_crossings();
         
-        // Step 5: Restore original position
+        // Step 6: Restore original position
         CUDA_CHECK(cudaMemcpy(d_nodes_x + node_id, &old_x, sizeof(int), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_nodes_y + node_id, &old_y, sizeof(int), cudaMemcpyHostToDevice));
         
-        // Step 6: Return delta
+        // Step 7: Return delta
         return new_crossings - current_crossings;
     }
     
@@ -964,26 +1219,15 @@ public:
         const auto& nodes_x = coords.first;
         const auto& nodes_y = coords.second;
         
-        // Compute bounding box for random position generation
-        int min_x = *std::min_element(nodes_x.begin(), nodes_x.end());
-        int max_x = *std::max_element(nodes_x.begin(), nodes_x.end());
-        int min_y = *std::min_element(nodes_y.begin(), nodes_y.end());
-        int max_y = *std::max_element(nodes_y.begin(), nodes_y.end());
-        
-        // Add some margin for exploration
-        int width = max_x - min_x;
-        int height = max_y - min_y;
-        min_x -= width / 4;
-        max_x += width / 4;
-        min_y -= height / 4;
-        max_y += height / 4;
+        // Use coordinate constraints for position generation
+        // Ensures all positions are within [0, max_width] x [0, max_height]
         
         // Random number generator
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> node_dist(0, num_nodes - 1);
-        std::uniform_int_distribution<> x_dist(min_x, max_x);
-        std::uniform_int_distribution<> y_dist(min_y, max_y);
+        std::uniform_int_distribution<> x_dist(0, max_width);
+        std::uniform_int_distribution<> y_dist(0, max_height);
         std::uniform_real_distribution<> prob_dist(0.0, 1.0);
         
         // Main SA loop
@@ -1060,13 +1304,17 @@ PYBIND11_MODULE(planar_cuda, m) {
             const std::vector<int>&,
             const std::vector<int>&,
             const std::vector<std::pair<int, int>>&,
+            int,
+            int,
             int
         >(),
         py::arg("nodes_x"),
         py::arg("nodes_y"),
         py::arg("edges"),
         py::arg("cell_size") = -1,
-        "Initialize solver with graph data. cell_size: 0=auto, >0=manual, <0=disabled")
+        py::arg("width") = 1000000,
+        py::arg("height") = 1000000,
+        "Initialize solver with graph data. cell_size: 0=auto, >0=manual, <0=disabled. width/height: coordinate constraints")
         
         .def("calculate_total_crossings", &PlanarSolver::calculate_total_crossings,
             "Calculate total number of edge crossings using GPU")
