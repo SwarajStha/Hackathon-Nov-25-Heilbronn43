@@ -12,14 +12,19 @@ class StrategyType(str, Enum):
     LEGACY = 'legacy'
     NEW = 'new'
     NUMBA = 'numba'
-    CUDA = 'cuda'  # 預留
+    CUDA = 'cuda'
+    ENHANCED = 'enhanced'  # 增強版（支持初始化策略）
 
 
 # 自動註冊策略
 from . import register
 
+# 導出增強策略
+from .enhanced import EnhancedSolverStrategy
+
 __all__ = [
     'ISolverStrategy',
     'SolverFactory',
     'StrategyType',
+    'EnhancedSolverStrategy',
 ]
