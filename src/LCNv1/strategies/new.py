@@ -11,6 +11,7 @@ from .base import ISolverStrategy, SolverFactory
 from ..core.geometry import Point
 from ..core.graph import GraphData, GridState
 from ..core.cost import SoftMaxCost
+from ..core.move_generator import HybridMoveGenerator
 
 
 class NewArchitectureSolverStrategy(ISolverStrategy):
@@ -23,7 +24,8 @@ class NewArchitectureSolverStrategy(ISolverStrategy):
     """
     
     def __init__(self, w_cross: float = 100.0, w_len: float = 1.0, 
-                 power: int = 2, cell_size: int = 50):
+                 power: int = 2, cell_size: int = 50,
+                 use_smart_moves: bool = True, smart_threshold: float = 10.0):
         """
         Initialize new architecture solver.
         
@@ -32,6 +34,8 @@ class NewArchitectureSolverStrategy(ISolverStrategy):
             w_len: Weight for edge length penalty
             power: Exponent for crossing penalty
             cell_size: Spatial hash cell size
+            use_smart_moves: 使用智能移動生成（避免違規）
+            smart_threshold: 溫度閾值（低於此值使用智能生成）
         """
         self.graph = None
         self.state = None
@@ -39,9 +43,17 @@ class NewArchitectureSolverStrategy(ISolverStrategy):
             w_cross=w_cross,
             w_len=w_len,
             power=power,
-            cell_size=cell_size
+            cell_size=cell_size,
+            enable_violation_check=(not use_smart_moves)  # 智能生成時關閉檢測
         )
         self.data = None
+        
+        # Move generation strategy
+        self.use_smart_moves = use_smart_moves
+        self.move_generator = HybridMoveGenerator(
+            max_retries=10,
+            smart_threshold=smart_threshold
+        ) if use_smart_moves else None
         
         # Optimization state
         self.current_energy = None
@@ -106,17 +118,21 @@ class NewArchitectureSolverStrategy(ISolverStrategy):
             
             # Generate move
             node_id = random.randint(0, self.graph.num_nodes - 1)
-            old_pos = self.state.get_position(node_id)
-            
-            # Generate new position (temperature-dependent step size)
             step_size = max(1, int(current_temp))
-            new_x = old_pos.x + random.randint(-step_size, step_size)
-            new_y = old_pos.y + random.randint(-step_size, step_size)
             
-            # Clip to bounds
-            new_x = max(0, min(self.state.width, new_x))
-            new_y = max(0, min(self.state.height, new_y))
-            new_pos = Point(new_x, new_y)
+            # Use smart move generator or fallback to random
+            if self.use_smart_moves:
+                new_pos = self.move_generator.generate_move(
+                    self.graph, self.state, node_id, step_size, current_temp
+                )
+            else:
+                # Original random generation
+                old_pos = self.state.get_position(node_id)
+                new_x = old_pos.x + random.randint(-step_size, step_size)
+                new_y = old_pos.y + random.randint(-step_size, step_size)
+                new_x = max(0, min(self.state.width, new_x))
+                new_y = max(0, min(self.state.height, new_y))
+                new_pos = Point(new_x, new_y)
             
             # Calculate delta using exact update
             delta = self.cost_func.calculate_delta(

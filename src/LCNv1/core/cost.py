@@ -67,7 +67,8 @@ class SoftMaxCost(ICostFunction):
     """
     
     def __init__(self, w_cross: float = 100.0, w_len: float = 1.0, 
-                 power: int = 2, cell_size: int = 50):
+                 power: int = 2, cell_size: int = 50,
+                 enable_violation_check: bool = False):
         """
         Initialize cost function.
         
@@ -76,11 +77,13 @@ class SoftMaxCost(ICostFunction):
             w_len: Weight for edge length penalty
             power: Exponent for crossing penalty (k^power)
             cell_size: Cell size for spatial hash
+            enable_violation_check: 啟用違規檢測（使用智能移動生成器時可關閉）
         """
         self.w_cross = w_cross
         self.w_len = w_len
         self.power = power
         self.cell_size = cell_size
+        self.enable_violation_check = enable_violation_check
         
         # Spatial hash for fast intersection queries
         self._spatial_hash = None
@@ -427,20 +430,22 @@ class SoftMaxCost(ICostFunction):
             graph, state, node_id, new_pos
         )
         
-        if dup_violations > 0:
-            # 有重複坐標 → 立即拒絕
-            return math.inf
+        # 啟用違規檢測模式：先檢查違規，再計算 cost
+        if self.enable_violation_check:
+            if dup_violations > 0:
+                # 有重複坐標 → 立即拒絕
+                return math.inf
+            
+            # 2. 檢查「邊穿過節點」違規（較慢，O(d*n + k)）
+            edge_violations = self._count_edge_through_node_violations(
+                graph, state, node_id, new_pos
+            )
+            
+            if edge_violations > 0:
+                # 有違規 → 立即拒絕
+                return math.inf
         
-        # 2. 檢查「邊穿過節點」違規（較慢，O(d*n + k)）
-        edge_violations = self._count_edge_through_node_violations(
-            graph, state, node_id, new_pos
-        )
-        
-        if edge_violations > 0:
-            # 有違規 → 立即拒絕
-            return math.inf
-        
-        # 3. 無違規 → 計算真實的 cost delta
+        # 3. 無違規（或已關閉違規檢測）→ 計算真實的 cost delta
         # Ensure spatial hash is up to date
         self._ensure_spatial_hash(graph, state)
         

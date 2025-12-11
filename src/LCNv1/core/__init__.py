@@ -8,6 +8,7 @@ from .graph import GraphData, GridState
 from .spatial_index import SpatialHash
 from .cost import ICostFunction, SoftMaxCost
 from .k_plane_cost import KPlaneCost
+from .move_generator import SmartMoveGenerator, HybridMoveGenerator
 
 __all__ = [
     'Point',
@@ -19,4 +20,6 @@ __all__ = [
     'ICostFunction',
     'SoftMaxCost',
     'KPlaneCost',
+    'SmartMoveGenerator',
+    'HybridMoveGenerator',
 ]
