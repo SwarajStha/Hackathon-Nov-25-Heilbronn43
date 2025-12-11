@@ -112,54 +112,179 @@ class SoftMaxCost(ICostFunction):
             return state.num_vertices
         raise AttributeError("Cannot determine number of nodes from graph/state.")
 
-    def _orientation(self, a: Point, b: Point, c: Point) -> int:
-        """Cross product sign for (b - a) x (c - a)."""
-        return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+    def _cross_product(self, ox: int, oy: int, ax: int, ay: int, bx: int, by: int) -> int:
+        """
+        Cross product of vectors OA and OB: (A-O) × (B-O)
+        
+        匹配 CUDA 實現：
+        cross = (ax - ox) * (by - oy) - (ay - oy) * (bx - ox)
+        
+        Returns:
+            > 0: Counter-clockwise turn (B is left of OA)
+            < 0: Clockwise turn (B is right of OA)
+            = 0: Collinear (O, A, B on same line)
+        """
+        dx1 = ax - ox
+        dy1 = ay - oy
+        dx2 = bx - ox
+        dy2 = by - oy
+        return dx1 * dy2 - dy1 * dx2
 
     def _segments_properly_intersect(self, p1: Point, p2: Point,
                                      q1: Point, q2: Point) -> bool:
         """
-        真交叉检测：两线段在内部相交（不含端点接触、重合等退化情况）。
+        真交叉檢測：兩線段在內部相交（嚴格匹配 CUDA 實現）
+        
+        Algorithm (from planar_cuda.cu):
+        - 檢查共享端點 → 返回 False
+        - 計算 cross products: d1, d2, d3, d4
+        - 檢查對立邊條件：
+          * q1 和 q2 在 p1-p2 兩側：(d1 < 0 && d2 > 0) || (d1 > 0 && d2 < 0)
+          * p1 和 p2 在 q1-q2 兩側：(d3 < 0 && d4 > 0) || (d3 > 0 && d4 < 0)
+        - 必須嚴格不等（排除共線/接觸）
         """
-        o1 = self._orientation(p1, p2, q1)
-        o2 = self._orientation(p1, p2, q2)
-        o3 = self._orientation(q1, q2, p1)
-        o4 = self._orientation(q1, q2, p2)
-
-        return (o1 * o2 < 0) and (o3 * o4 < 0)
+        # 快速拒絕：共享端點
+        if ((p1.x == q1.x and p1.y == q1.y) or (p1.x == q2.x and p1.y == q2.y) or
+            (p2.x == q1.x and p2.y == q1.y) or (p2.x == q2.x and p2.y == q2.y)):
+            return False
+        
+        # 計算 cross products（匹配 CUDA）
+        d1 = self._cross_product(p1.x, p1.y, p2.x, p2.y, q1.x, q1.y)
+        d2 = self._cross_product(p1.x, p1.y, p2.x, p2.y, q2.x, q2.y)
+        d3 = self._cross_product(q1.x, q1.y, q2.x, q2.y, p1.x, p1.y)
+        d4 = self._cross_product(q1.x, q1.y, q2.x, q2.y, p2.x, p2.y)
+        
+        # 對立邊測試（嚴格不等，排除 0）
+        opposite_12 = (d1 < 0 and d2 > 0) or (d1 > 0 and d2 < 0)
+        opposite_34 = (d3 < 0 and d4 > 0) or (d3 > 0 and d4 < 0)
+        
+        return opposite_12 and opposite_34
 
     def _point_on_segment_strict(self, a: Point, b: Point, c: Point) -> bool:
         """
-        判断点 c 是否在线段 ab 的“内部”（严格意义上的内部，不含端点）。
-        用于“顶点落在边上 → 非法”的检测。
+        判斷點 c 是否在線段 ab 的「內部」（嚴格意義上的內部，不含端點）
+        用於「頂點落在邊上 → 非法」的檢測
+        
+        匹配 CUDA point_on_segment_interior 邏輯
         """
-        # 共线性检查
-        if self._orientation(a, b, c) != 0:
+        # 共線性檢查（使用 cross_product）
+        if self._cross_product(a.x, a.y, b.x, b.y, c.x, c.y) != 0:
             return False
 
-        # 包含于边的包围盒
+        # 排除端點
+        if (c.x == a.x and c.y == a.y) or (c.x == b.x and c.y == b.y):
+            return False
+
+        # 包含於邊的包圍盒（內部）
         if c.x < min(a.x, b.x) or c.x > max(a.x, b.x):
             return False
         if c.y < min(a.y, b.y) or c.y > max(a.y, b.y):
             return False
 
-        # 排除端点
-        if (c.x == a.x and c.y == a.y) or (c.x == b.x and c.y == b.y):
-            return False
-
         return True
 
+    def _count_duplicate_coords(self, graph: GraphData, state: GridState, get_pos) -> int:
+        """
+        檢測重複坐標數量（匹配 CUDA）
+        返回：重複坐標的節點對數量
+        """
+        n = self._get_num_nodes(graph, state)
+        seen = {}
+        violations = 0
+        
+        for v in range(n):
+            p = get_pos(v)
+            key = (p.x, p.y)
+            if key in seen:
+                violations += 1  # 每個重複計 1
+            seen[key] = v
+        
+        return violations
+    
+    def _count_edge_through_node_violations(self, graph: GraphData, state: GridState,
+                                           node_id: int, new_pos: Point) -> int:
+        """
+        計算「邊穿過非端點節點」的違規數量（優化版本）
+        
+        優化策略：
+        1. Scenario 1: 只檢查與 node_id 相連的邊（degree(node_id) 條）
+        2. Scenario 2: 使用 spatial hash 只檢查 new_pos 附近的邊
+        
+        時間複雜度：O(d*n + E) → O(d*n + k) 其中 k = nearby edges << E
+        """
+        n = self._get_num_nodes(graph, state)
+        violations = 0
+        
+        # 獲取與 node_id 相連的邊（只有這些邊會受影響）
+        incident_edge_indices = []
+        for edge_idx in range(graph.num_edges):
+            src, tgt = graph.get_edge_endpoints(edge_idx)
+            if src == node_id or tgt == node_id:
+                incident_edge_indices.append(edge_idx)
+        
+        # Scenario 1: 與 node_id 相連的邊穿過其他節點
+        for edge_idx in incident_edge_indices:
+            src, tgt = graph.get_edge_endpoints(edge_idx)
+            
+            # 獲取移動後的邊端點
+            p1 = new_pos if src == node_id else state.get_position(src)
+            p2 = new_pos if tgt == node_id else state.get_position(tgt)
+            
+            # 檢查這條邊是否穿過其他節點
+            for nid in range(n):
+                if nid == src or nid == tgt:
+                    continue
+                
+                node_pos = state.get_position(nid) if nid != node_id else new_pos
+                if self._point_on_segment_strict(p1, p2, node_pos):
+                    violations += 1
+        
+        # Scenario 2: 其他邊穿過 node_id 的新位置
+        # 優化：使用 spatial hash（如果可用）
+        if hasattr(self, '_spatial_hash') and self._spatial_hash is not None:
+            # 查詢 new_pos 附近的邊（±1 像素的微小區域）
+            nearby_edges = self._spatial_hash.query_edge_region(
+                Point(new_pos.x - 1, new_pos.y - 1),
+                Point(new_pos.x + 1, new_pos.y + 1)
+            )
+            
+            for edge_idx in nearby_edges:
+                # 跳過與 node_id 相連的邊
+                if edge_idx in incident_edge_indices:
+                    continue
+                
+                src, tgt = graph.get_edge_endpoints(edge_idx)
+                p1 = state.get_position(src)
+                p2 = state.get_position(tgt)
+                
+                if self._point_on_segment_strict(p1, p2, new_pos):
+                    violations += 1
+        else:
+            # 沒有 spatial hash，全掃描（但跳過 incident edges）
+            for edge_idx in range(graph.num_edges):
+                if edge_idx in incident_edge_indices:
+                    continue
+                
+                src, tgt = graph.get_edge_endpoints(edge_idx)
+                p1 = state.get_position(src)
+                p2 = state.get_position(tgt)
+                
+                if self._point_on_segment_strict(p1, p2, new_pos):
+                    violations += 1
+        
+        return violations
+    
     def _has_illegal_configuration(self, graph: GraphData,
                                    state: GridState,
                                    get_pos) -> bool:
         """
-        检测两类非法情况：
-        1) 两个不同顶点坐标相同；
-        2) 非端点顶点落在线段内部。
+        檢測兩類非法情況：
+        1) 兩個不同頂點坐標相同；
+        2) 非端點頂點落在線段內部。
         """
         n = self._get_num_nodes(graph, state)
 
-        # 1) 顶点重合
+        # 1) 頂點重合
         seen = {}
         for v in range(n):
             p = get_pos(v)
@@ -168,7 +293,7 @@ class SoftMaxCost(ICostFunction):
                 return True
             seen[key] = v
 
-        # 2) 非端点顶点落在某条边内部
+        # 2) 非端點頂點落在某條邊內部
         for edge_idx in range(graph.num_edges):
             u, v = graph.get_edge_endpoints(edge_idx)
             a = get_pos(u)
@@ -279,33 +404,60 @@ class SoftMaxCost(ICostFunction):
         return float(k_max) * self.w_cross
 
     # ----------------------------------------------------------------------
-    # 精确 delta：cost(after_move) - cost(before_move)
-    # 非法 new_pos -> 返回 +inf
+    # 精確 delta：cost(after_move) - cost(before_move)
+    # 非法 new_pos -> 返回 +inf（匹配 CUDA compute_delta_e 邏輯）
     # ----------------------------------------------------------------------
     def calculate_delta(self, graph: GraphData, state: GridState,
                         node_id: int, new_pos: Point) -> float:
         """
         Calculate exact delta in cost for moving node_id to new_pos.
+        
+        匹配 CUDA compute_delta_e 的完整邏輯（優化版本）：
+        1. 快速檢查：節點重合（O(n)，提前失敗）
+        2. 慢速檢查：邊穿過節點（O(d*n + k)，使用 spatial hash 優化）
+        3. 無違規：計算真實的 K-value delta
+
+        優化亮點：
+        - 檢查順序優化（先快後慢）
+        - 使用 spatial hash 減少 Scenario 2 的檢查範圍
+        - 一旦發現違規立即返回（提前終止）
 
         返回:
             cost(after_move) - cost(before_move)
-
-        若移动后布局非法，则返回 +inf。
+            若移動後布局非法，則返回 +inf
         """
-        # 当前布局 cost（假设外部也用 calculate 的结果维护能量）
+        # CRITICAL: 優化的違規檢查順序
+        
+        # 1. 快速檢查：節點重合（O(n)，最快失敗）
+        def get_pos_after_move(v: int) -> Point:
+            return new_pos if v == node_id else state.get_position(v)
+        
+        dup_violations = self._count_duplicate_coords(graph, state, get_pos_after_move)
+        
+        if dup_violations > 0:
+            # 有重複坐標 → 立即拒絕
+            return math.inf
+        
+        # 2. 較慢檢查：邊穿過節點（O(d*n + k)，使用 spatial hash 優化）
+        edge_violations = self._count_edge_through_node_violations(
+            graph, state, node_id, new_pos
+        )
+        
+        if edge_violations > 0:
+            # 有違規 → 立即拒絕
+            return math.inf
+        
+        # 3. 無違規 → 計算真實的 cost delta
         old_cost = self.calculate(graph, state)
-
-        # 移动后布局 cost
         new_cost = self._calculate_with_move(graph, state, node_id, new_pos)
-
-        # 非法 new_pos -> delta = +inf
+        
+        # 雙重檢查：如果 cost 計算返回 inf（理論上不應發生）
         if not math.isfinite(new_cost):
             return math.inf
-
-        # 若当前布局本身非法（理论上不应出现），则视为巨大改进
+        
         if not math.isfinite(old_cost):
             return -math.inf
-
+        
         return new_cost - old_cost
 
     # ----------------------------------------------------------------------
