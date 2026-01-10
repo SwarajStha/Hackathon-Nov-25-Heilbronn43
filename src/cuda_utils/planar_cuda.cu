@@ -21,6 +21,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <cuda_runtime.h>
+#include <curand_kernel.h>
 #include <vector>
 #include <map>
 #include <algorithm>
@@ -144,6 +145,220 @@ __device__ bool segments_intersect(
     
     // All other cases (collinear, parallel, touching) are not crossings
     return false;
+}
+
+// ============================================================================
+// NEW: Smart Move Generation Device Functions
+// ============================================================================
+
+/**
+ * Check if a position is occupied by any node (excluding specific node).
+ * Device function - runs on GPU.
+ * 
+ * @param nodes_x: All node x-coordinates
+ * @param nodes_y: All node y-coordinates
+ * @param num_nodes: Total number of nodes
+ * @param exclude_node: Node ID to exclude from check
+ * @param check_x: X-coordinate to check
+ * @param check_y: Y-coordinate to check
+ * @return true if position is occupied
+ */
+__device__ bool is_position_occupied(
+    const int* nodes_x,
+    const int* nodes_y,
+    int num_nodes,
+    int exclude_node,
+    int check_x,
+    int check_y
+) {
+    for (int i = 0; i < num_nodes; i++) {
+        if (i != exclude_node) {
+            if (nodes_x[i] == check_x && nodes_y[i] == check_y) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Check if point is on segment interior (excluding endpoints).
+ * Device function - matches Python implementation.
+ * 
+ * @param px, py: Point to check
+ * @param x1, y1: Segment start
+ * @param x2, y2: Segment end
+ * @return true if point is on segment interior
+ */
+__device__ bool point_on_segment_interior_dev(
+    int px, int py,
+    int x1, int y1,
+    int x2, int y2
+) {
+    // Check if endpoint
+    if ((px == x1 && py == y1) || (px == x2 && py == y2)) {
+        return false;
+    }
+    
+    // Check collinearity
+    long long cross = cross_product(x1, y1, x2, y2, px, py);
+    if (cross != 0) {
+        return false;
+    }
+    
+    // Check if within bounding box
+    int min_x = (x1 < x2) ? x1 : x2;
+    int max_x = (x1 > x2) ? x1 : x2;
+    int min_y = (y1 < y2) ? y1 : y2;
+    int max_y = (y1 > y2) ? y1 : y2;
+    
+    if (px < min_x || px > max_x) return false;
+    if (py < min_y || py > max_y) return false;
+    
+    return true;
+}
+
+/**
+ * Check if new position would create edge-through-node violation.
+ * Device function - checks if any incident edge would pass through nodes.
+ * 
+ * @param nodes_x, nodes_y: All node coordinates
+ * @param edges: All edges
+ * @param num_nodes, num_edges: Counts
+ * @param node_id: Node being moved
+ * @param new_x, new_y: Proposed new position
+ * @return true if violation detected
+ */
+__device__ bool check_edge_violations(
+    const int* nodes_x,
+    const int* nodes_y,
+    const int2* edges,
+    int num_nodes,
+    int num_edges,
+    int node_id,
+    int new_x,
+    int new_y
+) {
+    // Check incident edges of node_id
+    for (int i = 0; i < num_edges; i++) {
+        int src = edges[i].x;
+        int tgt = edges[i].y;
+        
+        // Only check edges connected to node_id
+        if (src != node_id && tgt != node_id) {
+            continue;
+        }
+        
+        // Get the other endpoint
+        int other_node = (src == node_id) ? tgt : src;
+        int other_x = nodes_x[other_node];
+        int other_y = nodes_y[other_node];
+        
+        // Check if any other node is on this edge's new position
+        for (int nid = 0; nid < num_nodes; nid++) {
+            if (nid == node_id || nid == other_node) {
+                continue;
+            }
+            
+            int node_x = nodes_x[nid];
+            int node_y = nodes_y[nid];
+            
+            if (point_on_segment_interior_dev(
+                node_x, node_y,
+                new_x, new_y,
+                other_x, other_y
+            )) {
+                return true;  // Violation!
+            }
+        }
+    }
+    
+    return false;  // No violation
+}
+
+/**
+ * Smart move generation kernel - generates valid moves on GPU.
+ * 
+ * Strategy:
+ * - Each thread generates a valid move for one node
+ * - Checks: duplicate coordinates, edge violations
+ * - Returns valid position or original position if failed
+ * 
+ * @param nodes_x, nodes_y: Current node coordinates
+ * @param edges: Edge pairs
+ * @param num_nodes, num_edges: Counts
+ * @param node_id: Node to move (single node for SA)
+ * @param step_size: Maximum move distance
+ * @param max_retries: Maximum retry attempts
+ * @param seed: Random seed
+ * @param out_x, out_y: Output position
+ * @param max_width, max_height: Canvas bounds
+ */
+__global__ void generate_smart_move_kernel(
+    const int* nodes_x,
+    const int* nodes_y,
+    const int2* edges,
+    int num_nodes,
+    int num_edges,
+    int node_id,
+    int step_size,
+    int max_retries,
+    unsigned int seed,
+    int* out_x,
+    int* out_y,
+    int max_width,
+    int max_height
+) {
+    // Only one thread does the work (SA moves one node at a time)
+    if (threadIdx.x != 0 || blockIdx.x != 0) {
+        return;
+    }
+    
+    // Initialize random state
+    curandState state;
+    curand_init(seed, 0, 0, &state);
+    
+    int old_x = nodes_x[node_id];
+    int old_y = nodes_y[node_id];
+    
+    int current_radius = step_size;
+    
+    for (int attempt = 0; attempt < max_retries; attempt++) {
+        // Generate candidate position
+        int offset_x = curand(&state) % (2 * current_radius + 1) - current_radius;
+        int offset_y = curand(&state) % (2 * current_radius + 1) - current_radius;
+        
+        int new_x = old_x + offset_x;
+        int new_y = old_y + offset_y;
+        
+        // Clip to bounds
+        if (new_x < 0) new_x = 0;
+        if (new_x > max_width) new_x = max_width;
+        if (new_y < 0) new_y = 0;
+        if (new_y > max_height) new_y = max_height;
+        
+        // Check 1: Duplicate position
+        if (is_position_occupied(nodes_x, nodes_y, num_nodes, node_id, new_x, new_y)) {
+            current_radius = (int)(current_radius * 1.2f);
+            continue;
+        }
+        
+        // Check 2: Edge violations
+        if (check_edge_violations(nodes_x, nodes_y, edges, num_nodes, num_edges,
+                                 node_id, new_x, new_y)) {
+            current_radius = (int)(current_radius * 1.2f);
+            continue;
+        }
+        
+        // Valid move found!
+        *out_x = new_x;
+        *out_y = new_y;
+        return;
+    }
+    
+    // All retries failed - return original position
+    *out_x = old_x;
+    *out_y = old_y;
 }
 
 // ============================================================================
@@ -623,6 +838,9 @@ private:
     int* d_k_value_result;  ///< Device memory for K-value result
     bool k_value_dirty;     ///< True if K-value needs recalculation
     
+    // Smart move optimization control
+    bool enable_violation_check;  ///< Enable duplicate/collinear checks in delta_e (disable when using smart moves)
+    
     // Graph dimensions
     int num_nodes;        ///< Number of nodes in graph
     int num_edges;        ///< Number of edges in graph
@@ -694,6 +912,7 @@ public:
         d_edge_crossings(nullptr), d_k_value_result(nullptr),  // NEW
         num_nodes(nodes_x.size()), num_edges(edges.size()),
         bbox_cached(false), edge_cells_cached(false), k_value_dirty(true),  // NEW
+        enable_violation_check(true),  // Default: enable violation checks
         max_width(width), max_height(height)
     {
         // Cycle 3: Configure spatial hash
@@ -1619,24 +1838,29 @@ public:
         // - Add penalty for violations (not absolute rejection)
         // - Allows SA to explore through violations at high temperature
         // - Penalty: 10 billion per violation (discourages but doesn't block)
+        // - Can be DISABLED when using smart move generator (which already prevents violations)
         
-        // Count violations in ORIGINAL position
-        int violations_before = count_collinear_nodes_violations(node_id, all_x, all_y);
-        violations_before += count_collinear_violations(node_id, all_x, all_y);
-        violations_before += count_edge_through_node_violations(node_id, all_x, all_y);
+        long long penalty_change = 0;
         
-        // Update to NEW position for checking
-        all_x[node_id] = new_x;
-        all_y[node_id] = new_y;
-        
-        // Count violations in NEW position
-        int violations_after = count_collinear_nodes_violations(node_id, all_x, all_y);
-        violations_after += count_collinear_violations(node_id, all_x, all_y);
-        violations_after += count_edge_through_node_violations(node_id, all_x, all_y);
-        
-        // Calculate violation penalty change
-        // Penalty: 10 billion per violation (allows exploration but discourages violations)
-        long long penalty_change = static_cast<long long>(violations_after - violations_before) * 10000000000LL;
+        if (enable_violation_check) {
+            // Count violations in ORIGINAL position
+            int violations_before = count_collinear_nodes_violations(node_id, all_x, all_y);
+            violations_before += count_collinear_violations(node_id, all_x, all_y);
+            violations_before += count_edge_through_node_violations(node_id, all_x, all_y);
+            
+            // Update to NEW position for checking
+            all_x[node_id] = new_x;
+            all_y[node_id] = new_y;
+            
+            // Count violations in NEW position
+            int violations_after = count_collinear_nodes_violations(node_id, all_x, all_y);
+            violations_after += count_collinear_violations(node_id, all_x, all_y);
+            violations_after += count_edge_through_node_violations(node_id, all_x, all_y);
+            
+            // Calculate violation penalty change
+            // Penalty: 10 billion per violation (allows exploration but discourages violations)
+            penalty_change = static_cast<long long>(violations_after - violations_before) * 10000000000LL;
+        }
         
         // Note: penalty_change will be ADDED to crossing cost later
         // - If violations increase: positive penalty (discourage)
@@ -1733,17 +1957,21 @@ public:
         // Step 0: Check for duplicate coordinates (CRITICAL CONSTRAINT)
         // If new position overlaps with ANY other node, apply massive penalty
         // This prevents violations where multiple nodes share the same coordinate
-        std::vector<int> all_x(num_nodes);
-        std::vector<int> all_y(num_nodes);
-        CUDA_CHECK(cudaMemcpy(all_x.data(), d_nodes_x, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(all_y.data(), d_nodes_y, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+        // Can be DISABLED when using smart move generator (which already prevents duplicates)
         
-        for (int i = 0; i < num_nodes; i++) {
-            if (i != node_id && all_x[i] == new_x && all_y[i] == new_y) {
-                // VIOLATION: Duplicate coordinate detected!
-                // Return huge penalty to prevent SA from accepting this move
-                // Penalty = 1 billion crossings (effectively infinite)
-                return 1000000000LL;
+        if (enable_violation_check) {
+            std::vector<int> all_x(num_nodes);
+            std::vector<int> all_y(num_nodes);
+            CUDA_CHECK(cudaMemcpy(all_x.data(), d_nodes_x, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(all_y.data(), d_nodes_y, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+            
+            for (int i = 0; i < num_nodes; i++) {
+                if (i != node_id && all_x[i] == new_x && all_y[i] == new_y) {
+                    // VIOLATION: Duplicate coordinate detected!
+                    // Return huge penalty to prevent SA from accepting this move
+                    // Penalty = 1 billion crossings (effectively infinite)
+                    return 1000000000LL;
+                }
             }
         }
         
@@ -1756,28 +1984,35 @@ public:
         CUDA_CHECK(cudaMemcpy(&old_y, d_nodes_y + node_id, sizeof(int), cudaMemcpyDeviceToHost));
         
         // Step 3: Check for collinear edge violations (CRITICAL CONSTRAINT)
-        // Temporarily update coordinates in memory for checking
-        int orig_x = all_x[node_id];
-        int orig_y = all_y[node_id];
+        // Can be DISABLED when using smart move generator (which already prevents violations)
         
-        // STRATEGY: Penalty-based constraint enforcement (same as bottleneck)
-        int violations_before = count_collinear_nodes_violations(node_id, all_x, all_y);
-        violations_before += count_collinear_violations(node_id, all_x, all_y);
-        violations_before += count_edge_through_node_violations(node_id, all_x, all_y);
+        long long penalty_change = 0;
         
-        all_x[node_id] = new_x;
-        all_y[node_id] = new_y;
-        
-        int violations_after = count_collinear_nodes_violations(node_id, all_x, all_y);
-        violations_after += count_collinear_violations(node_id, all_x, all_y);
-        violations_after += count_edge_through_node_violations(node_id, all_x, all_y);
-        
-        // Calculate violation penalty change (10B per violation)
-        long long penalty_change = static_cast<long long>(violations_after - violations_before) * 10000000000LL;
-        
-        // Restore for subsequent steps (crossing calculation)
-        all_x[node_id] = orig_x;
-        all_y[node_id] = orig_y;
+        if (enable_violation_check) {
+            // Get coordinates for violation checking
+            std::vector<int> all_x(num_nodes);
+            std::vector<int> all_y(num_nodes);
+            CUDA_CHECK(cudaMemcpy(all_x.data(), d_nodes_x, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(all_y.data(), d_nodes_y, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+            
+            int orig_x = all_x[node_id];
+            int orig_y = all_y[node_id];
+            
+            // STRATEGY: Penalty-based constraint enforcement (same as bottleneck)
+            int violations_before = count_collinear_nodes_violations(node_id, all_x, all_y);
+            violations_before += count_collinear_violations(node_id, all_x, all_y);
+            violations_before += count_edge_through_node_violations(node_id, all_x, all_y);
+            
+            all_x[node_id] = new_x;
+            all_y[node_id] = new_y;
+            
+            int violations_after = count_collinear_nodes_violations(node_id, all_x, all_y);
+            violations_after += count_collinear_violations(node_id, all_x, all_y);
+            violations_after += count_edge_through_node_violations(node_id, all_x, all_y);
+            
+            // Calculate violation penalty change (10B per violation)
+            penalty_change = static_cast<long long>(violations_after - violations_before) * 10000000000LL;
+        }
         
         // Step 4: Temporarily apply the move
         CUDA_CHECK(cudaMemcpy(d_nodes_x + node_id, &new_x, sizeof(int), cudaMemcpyHostToDevice));
@@ -1877,11 +2112,75 @@ public:
     }
     
     /**
+     * NEW: Generate smart move on GPU (prevents violations at source).
+     * 
+     * Purpose:
+     *   - Generate valid move directly on GPU
+     *   - Avoids violation checking overhead in compute_delta_e
+     *   - Matches Python smart move generator logic
+     * 
+     * Strategy:
+     *   - Use GPU kernel to check duplicates and edge violations
+     *   - Retry with expanding radius if violations detected
+     *   - Return original position if all retries fail
+     * 
+     * @param node_id: Node to move
+     * @param step_size: Maximum move distance
+     * @param max_retries: Maximum retry attempts (default: 10)
+     * @return Pair (new_x, new_y) - guaranteed valid or original position
+     */
+    std::pair<int, int> generate_smart_move(
+        int node_id,
+        int step_size,
+        int max_retries = 10
+    ) {
+        // Allocate device memory for result
+        int* d_out_x = nullptr;
+        int* d_out_y = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_out_x, sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_out_y, sizeof(int)));
+        
+        // Generate random seed
+        std::random_device rd;
+        unsigned int seed = rd();
+        
+        // Launch smart move generation kernel
+        generate_smart_move_kernel<<<1, 1>>>(
+            d_nodes_x,
+            d_nodes_y,
+            d_edges,
+            num_nodes,
+            num_edges,
+            node_id,
+            step_size,
+            max_retries,
+            seed,
+            d_out_x,
+            d_out_y,
+            max_width,
+            max_height
+        );
+        
+        CUDA_CHECK(cudaDeviceSynchronize());
+        
+        // Download result
+        int new_x, new_y;
+        CUDA_CHECK(cudaMemcpy(&new_x, d_out_x, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&new_y, d_out_y, sizeof(int), cudaMemcpyDeviceToHost));
+        
+        // Cleanup
+        CUDA_CHECK(cudaFree(d_out_x));
+        CUDA_CHECK(cudaFree(d_out_y));
+        
+        return {new_x, new_y};
+    }
+    
+    /**
      * Cycle 4: Run Simulated Annealing optimization on GPU.
      * 
      * This is the core SA loop running entirely in C++/CUDA:
      * - Random node selection
-     * - Random position generation
+     * - Random position generation (smart or random)
      * - Delta cost computation (GPU) - can be total crossings OR K-value
      * - Metropolis acceptance criterion
      * - Temperature cooling
@@ -1892,13 +2191,17 @@ public:
      * @param start_temp: Initial temperature
      * @param cooling_rate: Temperature multiplier per iteration (0.9-0.99)
      * @param cost_function: "total_crossings", "bottleneck_p2", "bottleneck_p3", or "k_value"
+     * @param use_smart_moves: Use smart move generation (prevents violations)
+     * @param smart_threshold: Temperature threshold for smart moves
      * @return Statistics dictionary (initial/final crossings, accepted moves, etc.)
      */
     std::map<std::string, double> run_sa_optimization(
         int iterations,
         double start_temp,
         double cooling_rate,
-        const std::string& cost_function = "total_crossings"
+        const std::string& cost_function = "total_crossings",
+        bool use_smart_moves = false,
+        double smart_threshold = 10.0
     ) {
         // Initialize statistics
         std::map<std::string, double> stats;
@@ -1919,13 +2222,14 @@ public:
         int accepted_moves = 0;
         int rejected_moves = 0;
         
-        // Get current coordinates to compute bounds
-        auto coords = get_coordinates();
-        const auto& nodes_x = coords.first;
-        const auto& nodes_y = coords.second;
-        
-        // Use coordinate constraints for position generation
-        // Ensures all positions are within [0, max_width] x [0, max_height]
+        // Best state tracking (critical for SA!)
+        long long best_energy = initial_crossings;
+        int best_k = initial_k;
+        long long current_energy = initial_crossings;  // Track incrementally
+        std::vector<int> best_nodes_x(num_nodes);
+        std::vector<int> best_nodes_y(num_nodes);
+        CUDA_CHECK(cudaMemcpy(best_nodes_x.data(), d_nodes_x, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(best_nodes_y.data(), d_nodes_y, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
         
         // Random number generator
         std::random_device rd;
@@ -1940,9 +2244,32 @@ public:
             // Select random node
             int node_id = node_dist(gen);
             
-            // Generate random new position
-            int new_x = x_dist(gen);
-            int new_y = y_dist(gen);
+            // Generate new position (smart or random)
+            int new_x, new_y;
+            
+            // Calculate step size (matches Python: max(1, int(temp)))
+            int step_size = std::max(1, static_cast<int>(temperature));
+            
+            if (use_smart_moves && temperature <= smart_threshold) {
+                // Low temperature: Use smart generation to avoid violations
+                auto smart_pos = generate_smart_move(node_id, step_size, 10);
+                new_x = smart_pos.first;
+                new_y = smart_pos.second;
+            } else {
+                // High temperature or smart disabled: Random generation AROUND current position
+                auto current_pos = get_node_position(node_id);
+                int old_x = current_pos.first;
+                int old_y = current_pos.second;
+                
+                // Generate offset in range [-step_size, step_size]
+                std::uniform_int_distribution<int> offset_dist(-step_size, step_size);
+                int offset_x = offset_dist(gen);
+                int offset_y = offset_dist(gen);
+                
+                // Apply offset and clip to bounds
+                new_x = std::max(0, std::min(max_width, old_x + offset_x));
+                new_y = std::max(0, std::min(max_height, old_y + offset_y));
+            }
             
             // Compute delta cost based on chosen cost function
             long long delta_cost;
@@ -1977,6 +2304,18 @@ public:
                 // Apply move
                 update_node_position(node_id, new_x, new_y);
                 accepted_moves++;
+                
+                // Update current energy incrementally
+                current_energy += delta_cost;
+                
+                // Check if this is the best state so far
+                if (current_energy < best_energy) {
+                    best_energy = current_energy;
+                    best_k = calculate_k_value();  // Only calculate K when we find better solution
+                    // Save best state
+                    CUDA_CHECK(cudaMemcpy(best_nodes_x.data(), d_nodes_x, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(best_nodes_y.data(), d_nodes_y, num_nodes * sizeof(int), cudaMemcpyDeviceToHost));
+                }
             } else {
                 rejected_moves++;
             }
@@ -1985,11 +2324,13 @@ public:
             temperature *= cooling_rate;
         }
         
-        // Get final energy
-        long long final_crossings = calculate_total_crossings();
-        int final_k = calculate_k_value();
-        stats["final_crossings"] = static_cast<double>(final_crossings);
-        stats["final_k"] = static_cast<double>(final_k);
+        // Restore best state found during optimization
+        CUDA_CHECK(cudaMemcpy(d_nodes_x, best_nodes_x.data(), num_nodes * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_nodes_y, best_nodes_y.data(), num_nodes * sizeof(int), cudaMemcpyHostToDevice));
+        
+        // Return best energy (not final!)
+        stats["final_crossings"] = static_cast<double>(best_energy);
+        stats["final_k"] = static_cast<double>(best_k);
         stats["iterations"] = static_cast<double>(iterations);
         stats["accepted_moves"] = static_cast<double>(accepted_moves);
         stats["rejected_moves"] = static_cast<double>(rejected_moves);
@@ -2085,9 +2426,18 @@ PYBIND11_MODULE(planar_cuda, m) {
             py::arg("start_temp"),
             py::arg("cooling_rate"),
             py::arg("cost_function") = "total_crossings",
-            "Run Simulated Annealing optimization on GPU. cost_function: 'total_crossings', 'bottleneck_p2', 'bottleneck_p3', or 'k_value'");
+            py::arg("use_smart_moves") = false,
+            py::arg("smart_threshold") = 10.0,
+            "Run Simulated Annealing optimization on GPU. cost_function: 'total_crossings', 'bottleneck_p2', 'bottleneck_p3', or 'k_value'. use_smart_moves: enable violation-avoiding move generation. smart_threshold: temperature below which smart moves activate")
+        
+        // Smart Move Generator
+        .def("generate_smart_move", &PlanarSolver::generate_smart_move,
+            py::arg("node_id"),
+            py::arg("step_size"),
+            py::arg("max_retries") = 10,
+            "Generate a move that avoids violations (duplicate positions, incident edge interiors)");
     
     // Module metadata
-    m.attr("__version__") = "0.5.0-cycle4";
+    m.attr("__version__") = "0.5.0-cycle4-smart";
     m.attr("cuda_enabled") = true;
 }
